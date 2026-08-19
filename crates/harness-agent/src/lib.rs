@@ -4,9 +4,13 @@ mod command;
 mod error;
 mod event_source;
 mod handle;
+mod loop_driver;
 mod recovery;
 mod runtime;
 mod state;
+
+#[cfg(test)]
+mod driver_tests;
 
 pub use actor::{AgentActor, AgentExit, AgentExitReason};
 pub use bootstrap::{AgentBootstrap, AgentBootstrapError, AgentBootstrapper};
@@ -22,4 +26,4 @@ pub use recovery::{
 pub use runtime::{
     AgentActorConfig, AgentJoinError, AgentSpawnError, AgentTask, SpawnedAgent, spawn_agent,
 };
-pub use state::{AgentPhase, AgentState, ExecutionGate};
+pub use state::{AgentDriverBoundary, AgentPhase, AgentState, ExecutionGate};

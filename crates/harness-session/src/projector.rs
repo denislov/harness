@@ -84,6 +84,7 @@ pub struct SessionProjection {
     pub model_messages: Vec<Message>,
     pub inbox: InboxProjection,
     pub lifecycle: LifecycleProjection,
+    pub open_step_assistant_message: Option<MessageId>,
     pub last_model_request: Option<ModelRequested>,
     pub pending_model_request: Option<ModelRequested>,
     pub pending_tool_calls: BTreeMap<ToolCallId, PendingToolCall>,
@@ -251,6 +252,7 @@ impl ProjectorState {
                 self.projection.lifecycle.open_step = Some(position);
                 self.projection.lifecycle.last_started_step = Some(position);
                 self.current_step_assistant_seen = false;
+                self.projection.open_step_assistant_message = None;
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
                 Ok(())
@@ -336,6 +338,7 @@ impl ProjectorState {
                 self.current_step_announced_calls =
                     collect_announced_tool_calls(event, &data.message)?;
                 self.current_step_assistant_seen = true;
+                self.projection.open_step_assistant_message = Some(data.message.id.clone());
                 self.projection.pending_model_request = None;
                 self.projection.model_messages.push(data.message.clone());
                 Ok(())
@@ -379,6 +382,7 @@ impl ProjectorState {
                 self.projection.lifecycle.open_step = None;
                 self.projection.lifecycle.last_ended_step = Some(position);
                 self.current_step_assistant_seen = false;
+                self.projection.open_step_assistant_message = None;
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
                 Ok(())

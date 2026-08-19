@@ -1,4 +1,4 @@
-use harness_session::{RecoveryBlock, SessionProjection};
+use harness_session::{RecoveryBlock, SessionProjection, StepPosition};
 use harness_types::{AgentInstanceId, EventSeq, SessionId, StepNo, TurnNo};
 
 use crate::{AgentBootstrap, ResumeDecision};
@@ -10,6 +10,12 @@ pub enum AgentPhase {
     Idle { last_turn: Option<TurnNo> },
     Running { turn: TurnNo, step: Option<StepNo> },
     Maintenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentDriverBoundary {
+    ReadyForModel { position: StepPosition },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,10 +40,11 @@ pub struct AgentState {
     pub resume: ResumeDecision,
     pub projection: SessionProjection,
 
-    /// Process-local wake latch. It is reconstructed from durable pending Inbox
-    /// items on startup and becomes true only after a wakeup-bearing enqueue is
-    /// durably committed. Batch 05 does not yet consume this latch into a Turn;
-    /// the next driver batch will do so under the actor's single-owner task.
+    /// Process-local wake latch derived from durable pending Inbox items.
+    ///
+    /// A successful enqueue refreshes this field from the resulting projection.
+    /// Driver claims refresh it again, so a consumed wake does not remain latched
+    /// unless another pending Inbox item still carries `wakeup=true`.
     pub wake_requested: bool,
 }
 
@@ -67,10 +74,12 @@ impl AgentState {
         projection: SessionProjection,
         resume: ResumeDecision,
     ) {
+        let wake_requested = projection_has_pending_wakeup(&projection);
         self.expected_seq = expected_seq;
         self.gate = gate_from_resume(&resume);
         self.resume = resume;
         self.projection = projection;
+        self.wake_requested = wake_requested;
     }
 
     /// New turn creation is permitted only after all interrupted durable work has
@@ -83,6 +92,34 @@ impl AgentState {
 
     pub const fn needs_resume_work(&self) -> bool {
         !self.resume.is_clean()
+    }
+
+    /// Returns the external-operation boundary at which the deterministic actor
+    /// driver is currently parked.
+    ///
+    /// Batch 06 exposes only the model boundary. Future batches may add Tool or
+    /// approval boundaries without changing durable Session semantics.
+    pub fn driver_boundary(&self) -> Option<AgentDriverBoundary> {
+        if self.projection.open_step_assistant_message.is_some() {
+            return None;
+        }
+
+        let AgentPhase::Running {
+            turn,
+            step: Some(step),
+        } = &self.phase
+        else {
+            return None;
+        };
+        let ResumeDecision::ContinueOpenStep { position } = &self.resume else {
+            return None;
+        };
+
+        (position.turn == *turn && position.step == *step).then_some(
+            AgentDriverBoundary::ReadyForModel {
+                position: *position,
+            },
+        )
     }
 }
 
@@ -104,10 +141,10 @@ fn projection_has_pending_wakeup(projection: &SessionProjection) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentState;
-    use crate::{AgentBootstrap, ResumeDecision};
-    use harness_session::{SessionHead, SessionProjection};
-    use harness_types::{EventSeq, TurnNo};
+    use super::{AgentDriverBoundary, AgentState};
+    use crate::{AgentBootstrap, AgentPhase, ResumeDecision};
+    use harness_session::{SessionHead, SessionProjection, StepPosition};
+    use harness_types::{EventSeq, StepNo, TurnNo};
 
     fn id<T>(value: &str) -> T
     where
@@ -147,5 +184,26 @@ mod tests {
         assert!(state.gate.is_open());
         assert!(!state.can_start_new_turn());
         assert!(state.needs_resume_work());
+    }
+
+    #[test]
+    fn running_continue_open_step_exposes_ready_for_model_boundary() {
+        let position = StepPosition {
+            turn: TurnNo::FIRST,
+            step: StepNo::FIRST,
+        };
+        let mut state = AgentState::from_bootstrap(
+            id("agt_1"),
+            bootstrap(ResumeDecision::ContinueOpenStep { position }),
+        );
+        state.phase = AgentPhase::Running {
+            turn: position.turn,
+            step: Some(position.step),
+        };
+
+        assert_eq!(
+            state.driver_boundary(),
+            Some(AgentDriverBoundary::ReadyForModel { position })
+        );
     }
 }

@@ -118,7 +118,7 @@ Responsibilities:
 
 ## 6. `harness-agent`
 
-Suggested files:
+Current v0.1 Rust layout:
 
 ```text
 command.rs
@@ -141,10 +141,56 @@ Responsibilities:
 - AgentCommand plus durable acknowledgements;
 - injected AgentEventSource for durable event identity/time;
 - bootstrap and startup recovery convergence;
-- Inbox projection and wake-latch behavior;
+- Inbox projection and wake behavior;
 - AgentPhase and ExecutionGate;
-- turn/step driver;
-- cancellation convergence.
+- deterministic turn/step preparation;
+- external-operation driver boundaries;
+- future cancellation convergence.
+
+### 6.1 `loop_driver.rs`
+
+`loop_driver.rs` contains the deterministic planning layer introduced in Batch 06. It reads `AgentState` and produces the next process-local driver plan without performing storage or provider I/O.
+
+Conceptually:
+
+```text
+AgentState + SessionProjection
+          |
+          v
+      plan_next()
+          |
+          +-- Dormant
+          +-- StartNewTurn
+          +-- StartStep
+          +-- EnterCurrentStep
+          +-- EndOpenTurn
+          +-- Park(ReadyForModel)
+          +-- Deferred
+```
+
+`AgentActor` owns execution of the plan. It converts plans into `NewSessionEvent` batches, validates them against the exact local history, commits them through `SessionStore`, and refreshes projection/recovery state.
+
+The planner MUST NOT call LLM, Tool, ProviderHost, approval, or network interfaces.
+
+### 6.2 Deterministic versus external driver work
+
+Batch 06 establishes a strict split:
+
+```text
+actor deterministic work
+    turn/step numbering
+    inbox selection
+    inbox claim
+    user/message entry
+    exhausted-turn closure
+           |
+           v
+    ReadyForModel boundary
+----------- external boundary -----------
+           |
+           v
+future LLM operation
+```
 
 This crate coordinates session, tools and LLM abstractions but should not contain provider process management.
 
@@ -209,7 +255,7 @@ Responsibilities:
 - provider binding;
 - Agent Registry;
 - startup/shutdown orchestration;
-- application-facing façade.
+- application-facing facade.
 
 A future CLI or server binary should depend primarily on this crate.
 
@@ -263,11 +309,9 @@ Async/process concerns belong primarily in:
 
 This keeps protocol and durable-domain types portable and testable.
 
-The Rust reference implementation selects Tokio for the live `harness-agent` execution
-layer beginning in Batch 05. Tokio types are not introduced into `harness-types` or
-`harness-session`. The production policy for globally unique EventId generation remains
-a `harness-runtime` composition concern and is injected into `harness-agent` through
-`AgentEventSource`.
+The Rust reference implementation selects Tokio for the live `harness-agent` execution layer beginning in Batch 05. Tokio types are not introduced into `harness-types` or `harness-session`. The production policy for globally unique EventId generation remains a `harness-runtime` composition concern and is injected into `harness-agent` through `AgentEventSource`.
+
+Beginning in Batch 06, deterministic driver planning itself remains synchronous and provider-free even though the actor that commits the resulting plans is asynchronous. Future LLM/Tool waits should be represented as operations outside the deterministic planning function so mailbox progress can continue while capability I/O is pending.
 
 ## 13. First implementation vertical slice
 
@@ -292,3 +336,18 @@ user -> LLM -> tool -> LLM -> final answer
 ```
 
 and produce the expected durable event sequence before any out-of-process provider implementation is added.
+
+Batch 06 reaches the following intermediate milestone:
+
+```text
+Send
+ -> inbox/enqueued
+ -> wake
+ -> turn/started
+ -> inbox/claimed
+ -> step/started
+ -> user/message
+ -> ReadyForModel
+```
+
+The next implementation batch may therefore focus on `harness-llm` and an in-process fake model operation without changing Turn/Step entry semantics.

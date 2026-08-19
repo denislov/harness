@@ -44,13 +44,13 @@ Conceptual structure:
 
 ```rust
 pub enum AgentPhase {
-    Idle { last_turn: TurnNo },
-    Running { turn: TurnNo, step: StepNo },
+    Idle { last_turn: Option<TurnNo> },
+    Running { turn: TurnNo, step: Option<StepNo> },
     Maintenance,
 }
 ```
 
-The phase model deliberately does not include `WaitingForLlm`, `WaitingForTool`, or `WaitingForApproval`. Those are operations within a Running activity, not additional persistent state-machine phases.
+The phase model deliberately does not include `WaitingForLlm`, `WaitingForTool`, or `WaitingForApproval`. Those are operations or boundaries within a Running activity, not additional durable state-machine phases.
 
 ## 4. ExecutionGate
 
@@ -80,7 +80,7 @@ Contains ordinary future turn inputs, such as:
 - external task continuation;
 - subagent result in a future extension.
 
-At a new turn boundary, Core claims at most the ordinary message(s) required by the chosen batching rule. v0.1 reference behavior is one ordinary `next-turn` message per turn proposal.
+At a new turn boundary, Core claims at most the ordinary message(s) required by the chosen batching rule. v0.1 reference behavior is one ordinary `next-turn` message per new turn proposal.
 
 ### 5.2 `next-step`
 
@@ -92,6 +92,8 @@ Examples:
 - injected runtime context;
 - additional context resulting from a tool pipeline.
 
+At an eligible step boundary the v0.1 reference driver claims all `next-step` items currently visible in the actor's durable projection, preserving FIFO order within that queue.
+
 ### 5.3 Convenience semantics
 
 ```text
@@ -102,13 +104,17 @@ inject   = target next-step, wakeup false
 
 The stable primitive is `send(message, target, wakeup)`.
 
+The v0.1 Rust Agent Inbox accepts only user-role `Message` values. Provenance may still be `user`, `plugin`, or another allowed `MessageSource`; role controls how the message enters model history.
+
 ## 6. Wake behavior
 
-A wake request on an Idle, Open Agent starts the driver.
+A wake request on an Idle, Open Agent starts the deterministic driver.
 
 A wake arriving while a driver is active is persisted to Inbox and consumed according to the nearest eligible boundary. It does not create a second driver.
 
 A wake arriving after the active operation is already cancelled MUST NOT join the aborted activity. It is preserved for a later activity unless shutdown/disposal semantics require rejection.
+
+`wakeup` is not a durable counter. The live `wake_requested` latch is reconstructed from pending durable Inbox items with `wakeup=true`. Once such an item is claimed, the latch disappears unless another pending item still carries a wake request.
 
 ## 7. Turn semantics
 
@@ -141,11 +147,15 @@ turn/started
           turn/ended
 ```
 
+Batch 06 implements only the deterministic prefix through model-visible input entry. Model request execution begins at the `ReadyForModel` boundary introduced below.
+
 ## 8. Step semantics
 
 A step contains one model request attempt sequence that eventually yields one authoritative assistant message or a terminal step failure, followed by zero or more logical ToolCalls produced by that assistant message.
 
 Tool results that require another model request cause the turn to continue with another step.
+
+A step may receive multiple model-visible user-role inputs before its model request begins. One ordinary `next-turn` input is the primary input of a newly opened turn; `next-step` inputs are appended after that primary input in FIFO order.
 
 ## 9. Agent Loop pseudocode
 
@@ -230,66 +240,55 @@ Rules:
 
 ## 11. Resume
 
-On resume, Core loads durable session state, reconstructs:
+On resume, Core loads durable session state and reconstructs:
 
 - current Inbox projection;
-- last completed turn/step boundary;
+- last completed and currently open turn/step boundaries;
 - unresolved recovery gate;
-- model history projection.
+- model history projection;
+- incomplete model or Tool operation state.
 
-Normal execution starts only if the recovered structural invariants are valid and ExecutionGate is Open.
+Normal execution starts only if recovered structural invariants are valid and ExecutionGate is Open.
 
-## 12. Batch 05 live actor transport
+The process-local `AgentPhase` is never reconstructed as if a pre-crash task were still alive. A new process first owns the Session as `Idle` or `Maintenance`, analyzes durable state, and then explicitly reacquires driver ownership when it continues an unfinished turn/step.
 
-The v0.1 Rust reference actor uses a bounded Tokio `mpsc` mailbox. `AgentHandle`
-is cloneable; `AgentActor` is not. The mailbox receiver and all mutable Agent state
-remain owned by exactly one Tokio task.
+## 12. Live actor transport
 
-A submitted state-changing command carries a Tokio `oneshot` acknowledgement
-channel. Mailbox delivery alone is not durable acceptance. For `Send`, the actor
-MUST complete the following order:
+The v0.1 Rust reference actor uses a bounded Tokio `mpsc` mailbox. `AgentHandle` is cloneable; `AgentActor` is not. The mailbox receiver and all mutable Agent state remain owned by exactly one Tokio task.
+
+A submitted state-changing command carries a Tokio `oneshot` acknowledgement channel. Mailbox delivery alone is not durable acceptance. For `Send`, the actor MUST complete the following order:
 
 ```text
 receive command
+    -> validate command-level message constraints
     -> construct inbox/enqueued draft
     -> validate proposed durable history locally
     -> SessionStore.append(expected_seq)
     -> verify committed result
     -> update local projection / resume view
-    -> update wake latch
+    -> refresh wake latch from durable Inbox projection
     -> send acknowledgement
 ```
 
-If the caller receives `SendReceipt`, the corresponding `inbox/enqueued` event is
-already committed.
+If the caller receives `SendReceipt`, the corresponding `inbox/enqueued` event is already committed.
 
-Dropping the acknowledgement receiver after mailbox submission does not cancel the
-actor's durable mutation. Caller cancellation before the mailbox accepts the command
-means no acceptance guarantee exists.
+Dropping the acknowledgement receiver after mailbox submission does not cancel the actor's durable mutation. Caller cancellation before the mailbox accepts the command means no acceptance guarantee exists.
 
-## 13. Wake latch
+## 13. Wake latch and driver consumption
 
-`wakeup=true` sets a process-local `wake_requested` latch only after the enqueue is
-durable. Multiple wake requests may coalesce into one latch because wake is a request
-to run the single driver, not a durable count of driver executions.
+`wakeup=true` becomes visible to the driver only after `inbox/enqueued` commits. Multiple wake requests may coalesce because wake is a request to run the single driver, not a count of driver executions.
 
-On process restart the latch is reconstructed as true when any pending Inbox item was
-durably enqueued with `wakeup=true`.
+On process restart the latch is reconstructed as true when any pending Inbox item was durably enqueued with `wakeup=true`.
 
-Batch 05 does not yet consume the latch into a new Turn. Driver consumption is part of
-the next Turn/Step implementation batch.
+Beginning in Batch 06, the deterministic driver consumes this latch by durably claiming eligible Inbox work. After the claim batch commits, `wake_requested` is refreshed from the remaining pending Inbox projection. A queued future `next-turn` message can therefore keep the latch true while the current step is already parked at `ReadyForModel`.
 
 ## 14. Startup convergence before handle publication
 
-Before a new `AgentHandle` is returned, the Rust reference actor performs recovery
-steps that require no external capability call.
+Before a new `AgentHandle` is returned, the Rust reference actor performs all recovery and deterministic driver steps that require no external capability call.
 
 ### 14.1 Interrupted model attempt
 
-If projection yields `RecoverInterruptedModelRequest`, Core appends a durable
-`model/failed` with `MODEL_REQUEST_FAILED`, stating that the process restarted before
-a terminal model response became durable. This converts the state to ordinary open-step
-continuation.
+If projection yields `RecoverInterruptedModelRequest`, Core appends a durable `model/failed` with `MODEL_REQUEST_FAILED`, stating that the process restarted before a terminal model response became durable. This converts the state to ordinary open-step continuation.
 
 ### 14.2 Unknown non-idempotent Tool outcome
 
@@ -301,33 +300,108 @@ step/ended(blocked)
 turn/ended(blocked)
 ```
 
-The resulting Agent is exposed as `Idle + ExecutionGate::Blocked` with no open durable
-turn/step. Resolution still requires a late authoritative `tool/result` followed by
-`recovery/resolved` as defined by the recovery rules.
+The resulting Agent is exposed as `Idle + ExecutionGate::Blocked` with no open durable turn/step. Resolution still requires a late authoritative `tool/result` followed by `recovery/resolved` as defined by the recovery rules.
 
-### 14.3 Deferred startup work
+### 14.3 Deferred capability recovery
 
-The following remain driver/capability work and are not automatically converged by
-Batch 05:
+The following remain capability-driver work and are not automatically executed by Batch 06:
 
-- ordinary `ContinueOpenTurn`;
-- ordinary `ContinueOpenStep`;
 - `RecoverToolBatch` retries;
 - an already durable `Blocked` recovery gate.
 
+### 14.4 Deterministic lifecycle convergence
+
+After recovery-only convergence, Batch 06 continues any deterministic turn/step work before publishing the handle:
+
+- a pending waking Inbox item may open a new turn and step;
+- `ContinueOpenTurn` may start its next eligible step or close an exhausted turn;
+- a pre-assistant `ContinueOpenStep` may absorb pending `next-step` inputs;
+- a post-assistant open step is deferred for step/turn finalization rather than being mistaken for another model request;
+- the actor parks at `ReadyForModel` only when the open step has no authoritative assistant message.
+
+No provider call occurs before `AgentHandle` publication.
+
 ## 15. Live ownership conflict
 
-A `SessionStore::Conflict` observed by a live Agent append means the actor no longer
-has exclusive single-writer ownership of the Session snapshot it bootstrapped from.
-The actor MUST return an ownership-lost error for the command and terminate rather
-than adopting the competing writer's events into its local state.
+A `SessionStore::Conflict` observed by a live Agent append means the actor no longer has exclusive single-writer ownership of the Session snapshot it bootstrapped from. The actor MUST return an ownership-lost error for the command and terminate rather than adopting the competing writer's events into its local state.
 
-A future supervisor may choose to bootstrap a fresh Agent instance explicitly. The
-existing actor must not silently rebase itself.
+A future supervisor may choose to bootstrap a fresh Agent instance explicitly. The existing actor must not silently rebase itself.
 
-## 16. Batch 05 cancellation boundary
+## 16. Cancellation boundary
 
-The `Cancel` command remains part of the stable command vocabulary, but Batch 05 does
-not implement active-driver cancellation or durable Inbox discard convergence. The
-reference actor returns an explicit unsupported-operation error for `Cancel` until the
-Turn/Step driver introduces cancellation tokens and activity convergence.
+The `Cancel` command remains part of the stable command vocabulary, but Batch 06 does not yet implement cancellation of an external model/tool operation or durable Inbox discard convergence. The reference actor returns an explicit unsupported-operation error for `Cancel` until the capability driver introduces cancellation tokens and activity convergence.
+
+## 17. Deterministic driver boundary
+
+The Batch 06 driver performs only state transitions that can be decided from the actor's current durable projection. It MUST stop before an external capability invocation.
+
+The first exposed boundary is:
+
+```text
+ReadyForModel { turn, step }
+```
+
+`ReadyForModel` is process-local and MUST NOT be persisted as a new SessionEvent. In the Rust reference implementation it is derived from the conjunction:
+
+```text
+AgentPhase::Running { turn, step: Some(step) }
++
+ResumeDecision::ContinueOpenStep { same turn, same step }
++
+SessionProjection.open_step_assistant_message == None
+```
+
+This keeps the durable model minimal: after restart, replay plus recovery analysis is sufficient to rediscover the same boundary. `SessionProjection.open_step_assistant_message` is itself replay-derived and is not a durable field.
+
+An open step with an authoritative assistant message is not `ReadyForModel`; Batch 06 defers that post-assistant state so a restart cannot accidentally issue a duplicate model request.
+
+## 18. Atomic step-entry batching
+
+The v0.1 reference driver uses one atomic `SessionStore::append` batch for the deterministic entry into a step. This prevents a crash from durably claiming an Inbox item without also preserving its model-visible `user/message` fact.
+
+For the first step of a newly opened turn, event order is:
+
+```text
+turn/started
+inbox/claimed(next-turn)?
+step/started
+user/message(primary next-turn)?
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+The driver claims at most one `next-turn` item and all `next-step` items visible at that boundary. The model-visible order is primary `next-turn` first, followed by `next-step` items in queue order.
+
+For a new step inside an already open turn:
+
+```text
+inbox/claimed(next-turn)?    # only when resuming a turn that never started its first step
+step/started
+user/message(primary next-turn)?
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+For additional `next-step` input arriving while the current step is parked before model dispatch:
+
+```text
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+No second `step/started` event is emitted.
+
+## 19. Open-turn continuation rule
+
+`ContinueOpenTurn` has two cases.
+
+If the open turn has never started a step, the driver treats one pending `next-turn` item as its primary input and may also absorb all pending `next-step` inputs.
+
+If the open turn has already completed at least one step, only `next-step` work may continue that turn. A pending `next-turn` item belongs to a future turn. When no `next-step` work remains, Core appends `turn/ended(completed)`; the still-pending waking `next-turn` item may then open the next turn.
+
+## 20. Mailbox responsiveness boundary
+
+Batch 06 deliberately parks before model execution rather than awaiting an LLM from inside the deterministic driver loop.
+
+The architectural rule for the next capability batch is:
+
+> External capability waits MUST NOT require mutable Agent ownership to remain borrowed across the await in a way that prevents the actor mailbox from accepting steering, future-turn input, cancellation, or shutdown.
+
+Batch 06 establishes the durable and process-local boundary needed to implement that rule without changing Session semantics later.

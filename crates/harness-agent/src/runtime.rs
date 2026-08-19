@@ -92,6 +92,13 @@ pub async fn spawn_agent(
         .converge_startup(store.as_ref(), event_source.as_ref())
         .await?;
 
+    // Batch 06 also converges all deterministic Turn/Step work before the
+    // handle is published. The actor stops at an external-operation boundary
+    // such as ReadyForModel; no provider call is made here.
+    actor
+        .converge_driver_boundary(store.as_ref(), event_source.as_ref())
+        .await?;
+
     let (tx, rx) = mpsc::channel(config.mailbox_capacity);
     let handle = AgentHandle::new(instance_id, session_id, tx);
     let join = tokio::spawn(actor.run(store, event_source, rx));
@@ -265,9 +272,10 @@ mod tests {
         ));
 
         let snapshot = spawned.handle.snapshot().await.unwrap();
-        assert_eq!(snapshot.expected_seq, EventSeq::new(2).unwrap());
-        assert_eq!(snapshot.projection.inbox.next_turn.len(), 1);
-        assert!(snapshot.wake_requested);
+        assert_eq!(snapshot.expected_seq, EventSeq::new(6).unwrap());
+        assert!(snapshot.projection.inbox.is_empty());
+        assert!(!snapshot.wake_requested);
+        assert!(snapshot.driver_boundary().is_some());
 
         spawned.handle.shutdown().await.unwrap();
         let exit = spawned.task.join().await.unwrap();

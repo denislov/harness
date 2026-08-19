@@ -96,21 +96,40 @@ No semantic behavior may depend on identifier lexical order or prefix.
 
 ## I-21: EventId uniqueness within a Session
 
-Every committed `SessionEvent.eventId` MUST be unique within its Session. Projection
-MUST reject duplicate EventIds even when sequence numbers are otherwise valid.
+Every committed `SessionEvent.eventId` MUST be unique within its Session. Projection MUST reject duplicate EventIds even when sequence numbers are otherwise valid.
 
 ## I-22: Ownership conflict terminates the live actor
 
-If a live Agent's conditional append observes a Session head conflict, that Agent
-instance MUST stop authoring the Session. It MUST NOT silently load and adopt the
-competing writer's events.
+If a live Agent's conditional append observes a Session head conflict, that Agent instance MUST stop authoring the Session. It MUST NOT silently load and adopt the competing writer's events.
 
 ## I-23: Actor owner is singular
 
-The process-local mutable `AgentActor` owner MUST NOT be cloneable. Cloneable access
-is provided through message-passing handles only.
+The process-local mutable `AgentActor` owner MUST NOT be cloneable. Cloneable access is provided through message-passing handles only.
 
-## I-24: Wake is latched only after durable enqueue
+## I-24: Wake is visible only after durable enqueue
 
-A `wakeup=true` command MUST NOT make work eligible for the driver before the
-corresponding `inbox/enqueued` event has committed successfully.
+A `wakeup=true` command MUST NOT make work eligible for the driver before the corresponding `inbox/enqueued` event has committed successfully.
+
+## I-25: Inbox claim and model-visible entry are atomic
+
+When the deterministic driver consumes an Inbox item into a step, the `inbox/claimed` event and corresponding `user/message` event MUST commit in the same atomic SessionStore append batch.
+
+A crash MUST NOT leave an input durably claimed without preserving the model-visible fact that the claim was intended to enter.
+
+## I-26: Queue target semantics are preserved
+
+A running open step MAY consume pending `next-step` input at the current pre-model boundary. It MUST NOT consume pending `next-turn` input into that open step.
+
+When an open turn has already completed at least one step and has no immediate `next-step` work, pending `next-turn` work belongs to a future turn.
+
+## I-27: ReadyForModel is derived, not durable
+
+`ReadyForModel` MUST NOT be represented by a dedicated SessionEvent in v0.1. It is a process-local boundary derived from a structurally valid open step with no pending model request, no Tool recovery work, and no authoritative assistant message already recorded for that step.
+
+A restart MUST rediscover the boundary by replay and recovery analysis rather than by trusting pre-crash process state.
+
+## I-28: External waits must preserve mailbox progress
+
+An external model, Tool, approval, or provider wait MUST NOT require the single mutable Agent actor owner to remain unavailable for mailbox processing for the duration of that wait.
+
+The actor must remain able to durably accept eligible future input and, once implemented, cancellation/shutdown commands while external capability work is in flight.
