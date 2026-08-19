@@ -10,7 +10,7 @@ mod timestamp;
 mod usage;
 
 pub use blob::{BlobRef, Sha256Digest, Sha256DigestError};
-pub use counters::{CounterError, EventSeq, MAX_JS_SAFE_INTEGER, StepNo, TurnNo};
+pub use counters::{CounterError, EventSeq, MAX_JS_SAFE_INTEGER, StepNo, StreamSeq, TurnNo};
 pub use error::{ErrorCode, PortableError};
 pub use execution::{CancelCause, InboxTarget, SideEffectClass};
 pub use ids::{

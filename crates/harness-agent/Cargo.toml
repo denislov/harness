@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+harness-llm = { path = "../harness-llm" }
 harness-session = { path = "../harness-session" }
+harness-storage = { path = "../harness-storage" }
 harness-types = { path = "../harness-types" }
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 harness-storage-local = { path = "../harness-storage-local" }
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

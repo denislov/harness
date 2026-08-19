@@ -796,3 +796,256 @@ A post-assistant open step is deliberately deferred rather than mapped to `Ready
 Batch 06 introduces **no new SessionEvent type and no schema-version change**.
 
 `open_step_assistant_message` is projection state derived from existing `assistant/message` and `step/ended` facts.
+
+# Batch 07 API Surface
+
+## `harness-types`
+
+New counter:
+
+```rust
+pub struct StreamSeq(u64);
+```
+
+It has the same cross-language safe-integer rules as `EventSeq`, `TurnNo`, and `StepNo`.
+
+## `harness-storage`
+
+New crate:
+
+```rust
+#[async_trait]
+pub trait BlobStore: Send + Sync {
+    async fn put(
+        &self,
+        bytes: Vec<u8>,
+        media_type: Option<String>,
+    ) -> Result<BlobRef, BlobStoreError>;
+
+    async fn get(&self, blob_id: &BlobId) -> Result<Vec<u8>, BlobStoreError>;
+
+    async fn verify(&self, blob: &BlobRef) -> Result<(), BlobStoreError>;
+}
+```
+
+`BlobStoreError` variants:
+
+```text
+NotFound
+Integrity
+Backend
+```
+
+## `harness-storage-local`
+
+New reference backend:
+
+```rust
+pub struct MemoryBlobStore;
+
+impl MemoryBlobStore {
+    pub fn new() -> Self;
+    pub fn len(&self) -> Result<usize, BlobStoreError>;
+    pub fn is_empty(&self) -> Result<bool, BlobStoreError>;
+}
+```
+
+It implements `BlobStore` with SHA-256 content addressing and byte deduplication.
+
+## `harness-llm`
+
+### Request domain
+
+```rust
+pub struct ModelOptions {
+    pub max_output_tokens: Option<u32>,
+}
+
+pub struct ModelToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+pub struct ModelRequestConfig {
+    pub provider: ProviderId,
+    pub model: String,
+    pub system: Option<String>,
+    pub tools: Vec<ModelToolSpec>,
+    pub options: ModelOptions,
+}
+
+pub struct ModelRequest {
+    pub request_id: RequestId,
+    pub session_id: SessionId,
+    pub provider: ProviderId,
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<Message>,
+    pub tools: Vec<ModelToolSpec>,
+    pub options: ModelOptions,
+}
+```
+
+Important methods:
+
+```rust
+ModelRequestConfig::validate()
+ModelRequestConfig::build(...)
+ModelRequest::validate()
+ModelRequest::snapshot_bytes()
+```
+
+### Provider seam
+
+```rust
+pub type LlmEventStream = Pin<
+    Box<dyn Stream<Item = Result<SequencedStreamEvent, PortableError>> + Send + 'static>,
+>;
+
+pub trait LlmProvider: Send + Sync {
+    fn provider_id(&self) -> &ProviderId;
+    fn stream(&self, request: ModelRequest) -> LlmEventStream;
+}
+```
+
+This is a Core domain seam, not the cross-language Provider Protocol. A later Provider Host adapter will implement this trait after translating JSON-RPC/wire events.
+
+### Stream domain
+
+```rust
+pub enum BlockType {
+    Text,
+    Reasoning,
+    ToolCall,
+}
+
+pub enum FinishReason {
+    Completed,
+    MaxTokens,
+    Error,
+    Cancelled,
+}
+
+pub struct SequencedStreamEvent {
+    pub seq: StreamSeq,
+    pub event: StreamEvent,
+}
+```
+
+`StreamEvent` variants:
+
+```text
+BlockStart
+TextDelta
+ReasoningDelta
+ToolCallDelta
+BlockEnd
+Usage
+Finish
+```
+
+### Stream assembler
+
+```rust
+pub struct LlmStreamAssembler;
+
+impl LlmStreamAssembler {
+    pub fn new() -> Self;
+    pub fn push(&mut self, item: SequencedStreamEvent)
+        -> Result<(), StreamAssemblyError>;
+    pub fn finish(self)
+        -> Result<LlmStreamOutcome, StreamAssemblyError>;
+}
+```
+
+Outcomes:
+
+```rust
+pub enum LlmStreamOutcome {
+    Assistant {
+        content: Vec<ContentBlock>,
+        usage: Option<TokenUsage>,
+        finish_reason: FinishReason,
+    },
+    Failure {
+        failure: PortableError,
+        finish_reason: FinishReason,
+    },
+}
+```
+
+## `harness-agent`
+
+### LLM runtime binding
+
+```rust
+pub struct AgentLlmRuntime;
+
+impl AgentLlmRuntime {
+    pub fn new(
+        request_config: ModelRequestConfig,
+        provider: Arc<dyn LlmProvider>,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Result<Self, AgentLlmRuntimeError>;
+}
+```
+
+The constructor rejects a configured `ProviderId` that does not match the attached `LlmProvider`.
+
+### Live operation state
+
+```rust
+pub enum ActiveAgentOperation {
+    Model {
+        position: StepPosition,
+        request_id: RequestId,
+        attempt: u32,
+    },
+}
+```
+
+New field:
+
+```rust
+pub struct AgentState {
+    // existing fields ...
+    pub active_operation: Option<ActiveAgentOperation>,
+    pub wake_requested: bool,
+}
+```
+
+`active_operation` is explicitly process-local and is never reconstructed as durable state after restart.
+
+### Spawn entrypoint
+
+Existing detached mode remains:
+
+```rust
+spawn_agent(...)
+```
+
+New LLM-enabled mode:
+
+```rust
+pub async fn spawn_agent_with_llm(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    llm_runtime: AgentLlmRuntime,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError>;
+```
+
+The original `spawn_agent` is intentionally retained so Batch 06 deterministic driver tests and detached runtimes remain valid.
+
+### Internal mailbox
+
+The actor mailbox gains an internal-only completion variant:
+
+```text
+MailboxMessage::LlmCompleted(...)
+```
+
+This is not exposed through `AgentHandle`.

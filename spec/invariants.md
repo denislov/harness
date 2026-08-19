@@ -133,3 +133,19 @@ A restart MUST rediscover the boundary by replay and recovery analysis rather th
 An external model, Tool, approval, or provider wait MUST NOT require the single mutable Agent actor owner to remain unavailable for mailbox processing for the duration of that wait.
 
 The actor must remain able to durably accept eligible future input and, once implemented, cancellation/shutdown commands while external capability work is in flight.
+
+## I-25: Model snapshot precedes model dispatch
+
+Core MUST persist the exact provider-neutral ModelRequest snapshot in BlobStore before committing the `model/requested` event, and MUST commit `model/requested` before allowing the provider future to begin model execution.
+
+## I-26: External model I/O does not own the Agent mailbox
+
+The single-owner Agent actor MUST NOT await a live LLM provider stream inside its mailbox receive loop. Provider I/O runs as an external operation and returns completion through actor message passing.
+
+## I-27: Provider completion cannot author Session state
+
+An LLM provider task may report normalized stream completion only. The Agent actor remains the sole author of `assistant/message`, `model/failed`, and subsequent lifecycle events.
+
+## I-28: Live operation state is not durable recovery state
+
+A live `ActiveAgentOperation::Model` suppresses duplicate driver execution for the corresponding pending `model/requested`. After process loss, only the durable Session projection survives, so normal interrupted-model recovery applies.

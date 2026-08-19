@@ -507,3 +507,93 @@ Post-assistant step finalization is intentionally deferred to the next batch rat
 Batch 06 does not execute an LLM. It does not create a live `model/requested` event, run tools, finalize a post-assistant step, or implement active-operation cancellation.
 
 The intended next boundary is an in-process fake/model operation launched from `ReadyForModel` without blocking actor mailbox progress.
+
+# Harness API Batch 07
+
+Batch 07 is the first executable LLM vertical slice built on top of the Batch 06 deterministic Agent driver.
+
+## Scope
+
+This batch adds:
+
+- `harness-storage` with the generic `BlobStore` abstraction;
+- `MemoryBlobStore` in `harness-storage-local`;
+- provider-neutral `harness-llm` request and normalized stream APIs;
+- strict `LlmStreamAssembler` validation;
+- `StreamSeq` as a cross-language-safe runtime stream counter;
+- `AgentLlmRuntime` binding one model config, one LLM provider, and one BlobStore;
+- process-local `ActiveAgentOperation::Model` state;
+- request snapshot persistence before `model/requested`;
+- an external LLM task that reports completion through the Agent mailbox;
+- durable `assistant/message` / `model/failed` convergence;
+- no-tool assistant Step/Turn completion;
+- tool-call assistant parking for Batch 08;
+- an integration Fake LLM test slice;
+- removal of the Batch 06 unused `id<T>()` helper that triggered `cargo clippy -D warnings`.
+
+Tool execution, cancellation propagation, provider process protocol, prompt registry, and real provider adapters are deliberately out of scope.
+
+## Baseline
+
+`apply.py` targets the exact GitHub `main` state immediately after Batch 06. It verifies Git blob SHAs for all files it modifies before writing anything significant.
+
+The expected Batch 06 `loop_driver.rs` still contains the unused test-only `id<T>()` helper. The Batch 07 application removes it instead of suppressing the warning.
+
+## Apply
+
+From the extracted Batch 07 directory:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script adds the new crate/files, updates Cargo manifests, patches the Batch 06 runtime/loop driver, and appends the Batch 07 normative spec amendments.
+
+Then run:
+
+```bash
+cd /path/to/harness
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`Cargo.lock` is intentionally not shipped. Cargo should update it from your workspace dependency graph.
+
+## New runtime flow
+
+```text
+AgentHandle.followup
+    -> durable inbox/enqueued
+    -> ack
+    -> deterministic Turn/Step entry
+    -> ReadyForModel
+    -> build ModelRequest
+    -> BlobStore.put(exact JSON snapshot)
+    -> durable model/requested
+    -> ActiveAgentOperation::Model
+    -> spawn LLM provider stream task
+
+actor mailbox remains available
+    <- followup / steer / snapshot / shutdown
+
+LLM task
+    -> validate SequencedStreamEvent stream
+    -> one LlmCompletion through actor mailbox
+
+AgentActor
+    -> assistant/message OR model/failed
+    -> step/ended when no ToolCall remains
+    -> deterministic next-step / turn-end convergence
+```
+
+## Important semantics
+
+A live `model/requested` event projects as `RecoverInterruptedModelRequest`, because that is the correct durable interpretation after process loss. While the process is healthy, `ActiveAgentOperation::Model` overlays that projection and tells the live actor that the request is genuinely in flight. This prevents the deterministic driver from applying restart recovery to a normal live request.
+
+The external provider future has no SessionStore access. Only the Agent actor translates completion into authoritative SessionEvents.
+
+## Tool-call boundary
+
+Batch 07 understands normalized ToolCall blocks at the LLM stream layer, but does not yet own `ToolDefinition` metadata or the Tool pipeline. Therefore an assistant containing one or more ToolCall blocks is persisted as the authoritative `assistant/message` and the step remains open. Existing Session projection state prevents a second model request. Batch 08 starts from exactly this state.

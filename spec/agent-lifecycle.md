@@ -405,3 +405,28 @@ The architectural rule for the next capability batch is:
 > External capability waits MUST NOT require mutable Agent ownership to remain borrowed across the await in a way that prevents the actor mailbox from accepting steering, future-turn input, cancellation, or shutdown.
 
 Batch 06 establishes the durable and process-local boundary needed to implement that rule without changing Session semantics later.
+
+## 17. Batch 07 active external operation
+
+The live Agent state now distinguishes durable recovery interpretation from a process-local operation that is actually in flight.
+
+```text
+Durable projection:
+    pending model/requested
+    -> ResumeDecision::RecoverInterruptedModelRequest
+
+Live actor overlay:
+    ActiveAgentOperation::Model(requestId, position, attempt)
+```
+
+While the live overlay exists, Core MUST NOT execute startup-style interrupted-request recovery and MUST NOT issue a second model request. If the process disappears, the overlay disappears and the durable recovery decision becomes authoritative.
+
+## 18. LLM completion mailbox
+
+One LLM provider future runs outside the Agent mailbox loop. It emits a single normalized completion into the actor mailbox after consuming and validating the provider stream.
+
+The actor alone translates that completion into durable `assistant/message` or `model/failed` state. The provider task has no SessionStore authority.
+
+Commands accepted while the LLM future is pending are still serialized and persisted by the actor. In particular, a `next-step` steer accepted before model completion remains queued and may become input to the following step after the current assistant response converges.
+
+Shutdown aborts the process-local LLM task. An already committed `model/requested` without a terminal durable result is intentionally recoverable on the next process start.

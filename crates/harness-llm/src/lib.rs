@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Provider-neutral LLM domain types and streaming contracts.
+//!
+//! This crate deliberately contains no Provider Host process-management logic
+//! and no Tokio dependency. Concrete in-process or out-of-process adapters only
+//! need to implement [`LlmProvider`] and emit the normalized stream vocabulary.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod assembler;
+mod provider;
+mod request;
+mod stream;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use assembler::{LlmStreamAssembler, LlmStreamOutcome, StreamAssemblyError};
+pub use provider::{LlmEventStream, LlmProvider};
+pub use request::{
+    ModelOptions, ModelRequest, ModelRequestConfig, ModelRequestError, ModelSnapshotError,
+    ModelToolSpec,
+};
+pub use stream::{BlockType, FinishEvent, FinishReason, SequencedStreamEvent, StreamEvent};

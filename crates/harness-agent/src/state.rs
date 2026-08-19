@@ -1,5 +1,5 @@
 use harness_session::{RecoveryBlock, SessionProjection, StepPosition};
-use harness_types::{AgentInstanceId, EventSeq, SessionId, StepNo, TurnNo};
+use harness_types::{AgentInstanceId, EventSeq, RequestId, SessionId, StepNo, TurnNo};
 
 use crate::{AgentBootstrap, ResumeDecision};
 
@@ -16,6 +16,20 @@ pub enum AgentPhase {
 #[non_exhaustive]
 pub enum AgentDriverBoundary {
     ReadyForModel { position: StepPosition },
+}
+
+/// Process-local external operation owned by the live actor.
+///
+/// This state is deliberately not durable. If the process disappears, the
+/// durable `model/requested` fact is interpreted by `RecoveryAnalyzer` instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActiveAgentOperation {
+    Model {
+        position: StepPosition,
+        request_id: RequestId,
+        attempt: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +53,9 @@ pub struct AgentState {
     pub gate: ExecutionGate,
     pub resume: ResumeDecision,
     pub projection: SessionProjection,
+
+    /// Process-local operation currently crossing an external capability seam.
+    pub active_operation: Option<ActiveAgentOperation>,
 
     /// Process-local wake latch derived from durable pending Inbox items.
     ///
@@ -64,6 +81,7 @@ impl AgentState {
             gate,
             resume: bootstrap.resume,
             projection: bootstrap.projection,
+            active_operation: None,
             wake_requested,
         }
     }
@@ -83,24 +101,28 @@ impl AgentState {
     }
 
     /// New turn creation is permitted only after all interrupted durable work has
-    /// converged and the durable recovery gate is open.
+    /// converged, the durable recovery gate is open, and no live external
+    /// operation is still owned by this actor.
     pub const fn can_start_new_turn(&self) -> bool {
         matches!(&self.phase, AgentPhase::Idle { .. })
             && self.gate.is_open()
             && self.resume.is_clean()
+            && self.active_operation.is_none()
     }
 
     pub const fn needs_resume_work(&self) -> bool {
         !self.resume.is_clean()
     }
 
+    pub const fn has_active_operation(&self) -> bool {
+        self.active_operation.is_some()
+    }
+
     /// Returns the external-operation boundary at which the deterministic actor
     /// driver is currently parked.
-    ///
-    /// Batch 06 exposes only the model boundary. Future batches may add Tool or
-    /// approval boundaries without changing durable Session semantics.
     pub fn driver_boundary(&self) -> Option<AgentDriverBoundary> {
-        if self.projection.open_step_assistant_message.is_some() {
+        if self.active_operation.is_some() || self.projection.open_step_assistant_message.is_some()
+        {
             return None;
         }
 
@@ -141,10 +163,10 @@ fn projection_has_pending_wakeup(projection: &SessionProjection) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentDriverBoundary, AgentState};
+    use super::{ActiveAgentOperation, AgentDriverBoundary, AgentState};
     use crate::{AgentBootstrap, AgentPhase, ResumeDecision};
     use harness_session::{SessionHead, SessionProjection, StepPosition};
-    use harness_types::{EventSeq, StepNo, TurnNo};
+    use harness_types::{EventSeq, RequestId, StepNo, TurnNo};
 
     fn id<T>(value: &str) -> T
     where
@@ -205,5 +227,28 @@ mod tests {
             state.driver_boundary(),
             Some(AgentDriverBoundary::ReadyForModel { position })
         );
+    }
+
+    #[test]
+    fn active_model_operation_hides_ready_for_model_boundary() {
+        let position = StepPosition {
+            turn: TurnNo::FIRST,
+            step: StepNo::FIRST,
+        };
+        let mut state = AgentState::from_bootstrap(
+            id("agt_1"),
+            bootstrap(ResumeDecision::ContinueOpenStep { position }),
+        );
+        state.phase = AgentPhase::Running {
+            turn: position.turn,
+            step: Some(position.step),
+        };
+        state.active_operation = Some(ActiveAgentOperation::Model {
+            position,
+            request_id: RequestId::new("req_1").unwrap(),
+            attempt: 1,
+        });
+
+        assert!(state.driver_boundary().is_none());
     }
 }

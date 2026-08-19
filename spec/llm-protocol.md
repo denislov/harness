@@ -168,3 +168,55 @@ Core owns logical retry policy. A retry is represented as another `model/request
 Core cancellation propagates to the active provider operation through Provider Protocol. The first accepted cancellation cause remains authoritative.
 
 Provider-side completion that races with cancellation is resolved by Core according to the operation state observed at the authoritative boundary; providers MUST NOT independently mutate durable outcome state.
+
+## 13. Batch 07 Rust reference contract
+
+The Rust reference implementation introduces `harness-llm` as a runtime-neutral domain crate. It does not depend on Tokio and does not manage provider processes.
+
+The normalized in-process provider seam is conceptually:
+
+```rust
+pub trait LlmProvider: Send + Sync {
+    fn provider_id(&self) -> &ProviderId;
+    fn stream(&self, request: ModelRequest) -> LlmEventStream;
+}
+```
+
+`LlmEventStream` yields `SequencedStreamEvent` values or normalized `PortableError` failures. Provider Host implementations added later MUST adapt their wire protocol into the same domain stream rather than exposing transport-specific events to Agent Core.
+
+`StreamSeq` is a positive cross-language-safe integer. The first emitted event MUST use sequence 1 and each later event MUST increment by exactly one.
+
+`LlmStreamAssembler` validates sequence order, block lifecycle, delta/block-end consistency, usage multiplicity, finish payload shape, exactly one terminal finish, and the prohibition on post-finish events. A stream protocol violation becomes `PROVIDER_PROTOCOL_ERROR` at the Agent boundary.
+
+## 14. Live LLM operation boundary
+
+Before one live LLM operation starts, Core MUST perform this order:
+
+```text
+build provider-neutral ModelRequest
+    -> serialize exact request snapshot
+    -> BlobStore.put(snapshot)
+    -> commit model/requested(snapshot BlobRef)
+    -> mark process-local ActiveAgentOperation::Model
+    -> spawn provider stream future
+```
+
+The provider stream future MUST NOT be awaited by the single-owner Agent mailbox loop. It runs as an external task and reports one normalized completion back through the same actor mailbox.
+
+This separation keeps `followup`, `steer`, snapshot, shutdown, and future cancellation commands responsive while model I/O is pending.
+
+A process-local active model operation is not durable. If the process disappears after `model/requested`, normal startup recovery interprets the pending request as an interrupted attempt.
+
+## 15. Batch 07 post-assistant boundary
+
+For an assistant response without ToolCall blocks, Core may immediately append `step/ended` and deterministically continue or close the turn.
+
+For an assistant response containing ToolCall blocks, Batch 07 commits the authoritative `assistant/message` and leaves the step open. Tool definition resolution, `tool/call` persistence, policy, dispatch, and continuation are Batch 08 responsibilities. The existing open-step assistant projection prevents a restart or later driver pass from issuing a duplicate model request.
+
+## 16. Finish normalization details
+
+A normalized `finish(cancelled)` MUST carry a `PortableError` whose code is `CANCELLED`. A normalized `finish(error)` MUST NOT carry `CANCELLED`; cancellation therefore cannot be accidentally reclassified as an ordinary provider failure by the Agent layer.
+
+An `LlmProvider` stream MUST terminate after emitting its terminal `Finish` event. The reference operation consumes the stream through that terminal boundary and treats a missing `Finish` before stream termination as `PROVIDER_PROTOCOL_ERROR`. Timeout enforcement for a provider that never terminates remains deferred to the capability timeout layer.
+
+`LlmProvider::stream` MUST return promptly and MUST NOT perform blocking I/O before returning the Stream. Asynchronous provider setup belongs in the returned stream implementation. This preserves actor/runtime responsiveness even when the reference runtime is configured with a single Tokio worker.

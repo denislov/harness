@@ -7,7 +7,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     AgentActor, AgentBootstrapError, AgentBootstrapper, AgentError, AgentEventSource, AgentExit,
-    AgentHandle,
+    AgentHandle, AgentLlmRuntime,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,13 +68,51 @@ pub struct SpawnedAgent {
     pub task: AgentTask,
 }
 
-/// Bootstraps one Session, performs recovery actions that are safe without
-/// external capability execution, then starts the single-owner Tokio actor task.
+/// Bootstraps one Session without attaching an LLM provider.
+///
+/// This preserves the Batch 06 detached-driver mode used by deterministic tests:
+/// the actor may park at `ReadyForModel` but performs no external model call.
 pub async fn spawn_agent(
     instance_id: AgentInstanceId,
     session_id: SessionId,
     store: Arc<dyn SessionStore>,
     event_source: Arc<dyn AgentEventSource>,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError> {
+    spawn_agent_inner(instance_id, session_id, store, event_source, None, config).await
+}
+
+/// Bootstraps one Session and attaches the first provider-neutral LLM runtime.
+///
+/// Before the handle is published, deterministic startup/driver convergence is
+/// completed and an already-ready model operation is durably snapshotted and
+/// dispatched into an external task. Model streaming itself never owns the actor
+/// mailbox loop.
+pub async fn spawn_agent_with_llm(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    llm_runtime: AgentLlmRuntime,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError> {
+    spawn_agent_inner(
+        instance_id,
+        session_id,
+        store,
+        event_source,
+        Some(llm_runtime),
+        config,
+    )
+    .await
+}
+
+async fn spawn_agent_inner(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    llm_runtime: Option<AgentLlmRuntime>,
     config: AgentActorConfig,
 ) -> Result<SpawnedAgent, AgentSpawnError> {
     if config.mailbox_capacity == 0 {
@@ -85,23 +123,27 @@ pub async fn spawn_agent(
     let bootstrap = bootstrapper.load(store.as_ref(), &session_id).await?;
     let mut actor = AgentActor::from_bootstrap(instance_id.clone(), bootstrap);
 
-    // Convergence happens before the handle is published. Callers therefore never
-    // observe a live actor that still needs to persist an interrupted model failure
-    // or an unknown non-idempotent recovery gate.
     actor
         .converge_startup(store.as_ref(), event_source.as_ref())
         .await?;
 
-    // Batch 06 also converges all deterministic Turn/Step work before the
-    // handle is published. The actor stops at an external-operation boundary
-    // such as ReadyForModel; no provider call is made here.
+    let (tx, rx) = mpsc::channel(config.mailbox_capacity);
+
+    // The handle is not published until all deterministic work and the durable
+    // model-request start boundary have converged. The provider future may finish
+    // quickly and queue its completion before the actor task starts; the bounded
+    // mailbox safely retains that single completion.
     actor
-        .converge_driver_boundary(store.as_ref(), event_source.as_ref())
+        .advance_runtime(
+            store.as_ref(),
+            event_source.as_ref(),
+            llm_runtime.as_ref(),
+            &tx,
+        )
         .await?;
 
-    let (tx, rx) = mpsc::channel(config.mailbox_capacity);
-    let handle = AgentHandle::new(instance_id, session_id, tx);
-    let join = tokio::spawn(actor.run(store, event_source, rx));
+    let handle = AgentHandle::new(instance_id, session_id, tx.clone());
+    let join = tokio::spawn(actor.run(store, event_source, llm_runtime, tx, rx));
 
     Ok(SpawnedAgent {
         handle,

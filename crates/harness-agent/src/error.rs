@@ -1,5 +1,5 @@
 use harness_session::SessionStoreError;
-use harness_types::{ErrorCode, EventSeq, SessionId};
+use harness_types::{ErrorCode, EventSeq, RequestId, SessionId};
 use thiserror::Error;
 
 /// Stable Agent-layer failure surfaced to command callers and task supervision.
@@ -18,11 +18,23 @@ pub enum AgentError {
     #[error("session storage failure ({code:?}): {message}")]
     Storage { code: ErrorCode, message: String },
 
+    #[error("blob storage failure: {message}")]
+    BlobStorage { message: String },
+
+    #[error("invalid model request: {message}")]
+    InvalidModelRequest { message: String },
+
     #[error("invalid durable mutation: {message}")]
     InvalidDurableMutation { message: String },
 
     #[error("SessionStore contract violation: {message}")]
     StorageContractViolation { message: String },
+
+    #[error("unexpected completion for model request {request_id}: {message}")]
+    UnexpectedModelCompletion {
+        request_id: RequestId,
+        message: String,
+    },
 
     #[error("operation {operation} is not available in this Agent runtime stage: {reason}")]
     UnsupportedOperation {
@@ -53,7 +65,11 @@ impl AgentError {
     pub const fn is_terminal_for_actor(&self) -> bool {
         matches!(
             self,
-            Self::OwnershipLost { .. } | Self::StorageContractViolation { .. }
+            Self::OwnershipLost { .. }
+                | Self::BlobStorage { .. }
+                | Self::InvalidModelRequest { .. }
+                | Self::StorageContractViolation { .. }
+                | Self::UnexpectedModelCompletion { .. }
         )
     }
 }

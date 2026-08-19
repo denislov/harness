@@ -1,20 +1,24 @@
 use std::sync::Arc;
 
+use harness_llm::{FinishReason, LlmStreamOutcome};
 use harness_session::{
-    InboxClaimed, InboxEnqueued, ModelFailed, NewSessionEvent, RecoveryBlockKind, RecoveryBlocked,
-    SessionEvent, SessionEventPayload, SessionProjector, SessionStore, StepEndReason, StepEnded,
-    StepPosition, StepStarted, TurnEndReason, TurnEnded, TurnStarted, UserMessage,
-    V1SessionProjector,
+    AssistantMessage, InboxClaimed, InboxEnqueued, ModelFailed, ModelRequested, NewSessionEvent,
+    RecoveryBlockKind, RecoveryBlocked, SessionEvent, SessionEventPayload, SessionProjector,
+    SessionStore, StepEndReason, StepEnded, StepPosition, StepStarted, TurnEndReason, TurnEnded,
+    TurnStarted, UserMessage, V1SessionProjector,
 };
 use harness_types::{
-    AgentInstanceId, ErrorCode, InboxTarget, Message, PortableError, Role, StepNo, TurnNo,
+    AgentInstanceId, ContentBlock, ErrorCode, EventId, InboxTarget, Message, MessageId,
+    MessageSource, PortableError, RequestId, Role, StepNo, TurnNo,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 
+use crate::llm_operation::spawn_llm_operation;
 use crate::loop_driver::{DriverPlan, PlannedInboxInput, plan_next};
 use crate::{
-    AgentBootstrap, AgentCommand, AgentCommandAck, AgentError, AgentEventSource, AgentPhase,
-    AgentState, MailboxMessage, RecoveryAnalyzer, ResumeDecision, SendReceipt,
+    ActiveAgentOperation, AgentBootstrap, AgentCommand, AgentCommandAck, AgentError,
+    AgentEventSource, AgentLlmRuntime, AgentPhase, AgentState, LlmCompletion, MailboxMessage,
+    RecoveryAnalyzer, ResumeDecision, SendReceipt,
 };
 
 /// Single-owner process-local Agent actor state.
@@ -22,10 +26,10 @@ use crate::{
 /// This type deliberately does not implement `Clone`. Duplicating the owner
 /// would violate the Session single-writer invariant. Cloneable access is
 /// provided only through `AgentHandle`.
-#[derive(Debug)]
 pub struct AgentActor {
     state: AgentState,
     history: Vec<SessionEvent>,
+    active_llm_task: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +52,7 @@ impl AgentActor {
         Self {
             state: AgentState::from_bootstrap(instance_id, bootstrap),
             history,
+            active_llm_task: None,
         }
     }
 
@@ -60,10 +65,6 @@ impl AgentActor {
     }
 
     /// Performs only recovery actions that require no external capability call.
-    ///
-    /// The startup convergence pass converts interrupted model attempts into
-    /// durable failures and unknown non-idempotent Tool outcomes into durable
-    /// blocked gates before the live actor is exposed.
     pub(crate) async fn converge_startup(
         &mut self,
         store: &dyn SessionStore,
@@ -133,16 +134,15 @@ impl AgentActor {
 
     /// Advances deterministic Turn/Step state until an external-operation boundary
     /// is reached or no currently supported driver work remains.
-    ///
-    /// This method never performs an LLM or Tool provider call. It only appends
-    /// durable lifecycle, Inbox-claim, and user/message facts. Therefore it may run
-    /// inside the single-owner actor without turning a future provider await into a
-    /// mailbox stall.
     pub(crate) async fn converge_driver_boundary(
         &mut self,
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
     ) -> Result<(), AgentError> {
+        if self.state.active_operation.is_some() {
+            return Ok(());
+        }
+
         loop {
             match plan_next(&self.state)? {
                 DriverPlan::Dormant => {
@@ -215,10 +215,350 @@ impl AgentActor {
         }
     }
 
+    /// Runs deterministic state transitions, then starts at most one external LLM
+    /// operation. The external future is spawned and reports completion back through
+    /// the actor mailbox; it is never awaited while the actor owns the mailbox loop.
+    pub(crate) async fn advance_runtime(
+        &mut self,
+        store: &dyn SessionStore,
+        event_source: &dyn AgentEventSource,
+        llm_runtime: Option<&AgentLlmRuntime>,
+        self_tx: &mpsc::Sender<MailboxMessage>,
+    ) -> Result<(), AgentError> {
+        if self.state.active_operation.is_some() {
+            return Ok(());
+        }
+
+        self.converge_driver_boundary(store, event_source).await?;
+
+        let Some(llm_runtime) = llm_runtime else {
+            return Ok(());
+        };
+        let Some(crate::AgentDriverBoundary::ReadyForModel { position }) =
+            self.state.driver_boundary()
+        else {
+            return Ok(());
+        };
+
+        self.start_model_operation(store, event_source, llm_runtime, position, self_tx)
+            .await
+    }
+
+    async fn start_model_operation(
+        &mut self,
+        store: &dyn SessionStore,
+        event_source: &dyn AgentEventSource,
+        llm_runtime: &AgentLlmRuntime,
+        position: StepPosition,
+        self_tx: &mpsc::Sender<MailboxMessage>,
+    ) -> Result<(), AgentError> {
+        if self.state.active_operation.is_some() {
+            return Err(AgentError::InvalidDurableMutation {
+                message: "attempted to start a model operation while another external operation is active"
+                    .to_owned(),
+            });
+        }
+
+        let attempt = self.next_model_attempt(position)?;
+        let request_event_id = event_source.next_event_id();
+        let request_id = request_id_from_event(&request_event_id)?;
+        let request = llm_runtime
+            .request_config()
+            .build(
+                request_id.clone(),
+                self.state.session_id.clone(),
+                self.state.projection.model_messages.clone(),
+            )
+            .map_err(|error| AgentError::InvalidModelRequest {
+                message: error.to_string(),
+            })?;
+        let snapshot_bytes =
+            request
+                .snapshot_bytes()
+                .map_err(|error| AgentError::InvalidModelRequest {
+                    message: error.to_string(),
+                })?;
+        let request_snapshot = llm_runtime
+            .blob_store()
+            .put(snapshot_bytes, Some("application/json".to_owned()))
+            .await
+            .map_err(|error| AgentError::BlobStorage {
+                message: error.to_string(),
+            })?;
+
+        let history_through_seq = self.state.expected_seq;
+        let draft = NewSessionEvent::new(
+            request_event_id,
+            event_source.now(),
+            SessionEventPayload::ModelRequested(ModelRequested {
+                request_id: request_id.clone(),
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+                history_through_seq,
+                request_snapshot,
+                attempt,
+            }),
+        )
+        .in_step(position.turn, position.step);
+        self.append_validated(store, vec![draft]).await?;
+
+        self.state.active_operation = Some(ActiveAgentOperation::Model {
+            position,
+            request_id: request_id.clone(),
+            attempt,
+        });
+        self.active_llm_task = Some(spawn_llm_operation(
+            llm_runtime.provider().clone(),
+            request,
+            position,
+            self_tx.clone(),
+        ));
+        Ok(())
+    }
+
+    fn next_model_attempt(&self, position: StepPosition) -> Result<u32, AgentError> {
+        let mut previous = None;
+        for event in self.history.iter().rev() {
+            if event.turn() == Some(position.turn)
+                && event.step() == Some(position.step)
+                && let SessionEventPayload::ModelRequested(data) = event.payload()
+            {
+                previous = Some(data.attempt);
+                break;
+            }
+        }
+
+        match previous {
+            Some(attempt) => {
+                attempt
+                    .checked_add(1)
+                    .ok_or_else(|| AgentError::InvalidModelRequest {
+                        message: "model request attempt overflow".to_owned(),
+                    })
+            }
+            None => Ok(1),
+        }
+    }
+
+    async fn handle_llm_completion(
+        &mut self,
+        store: &dyn SessionStore,
+        event_source: &dyn AgentEventSource,
+        llm_runtime: Option<&AgentLlmRuntime>,
+        completion: LlmCompletion,
+    ) -> Result<(), AgentError> {
+        let Some(ActiveAgentOperation::Model {
+            position,
+            request_id,
+            attempt: _,
+        }) = self.state.active_operation.clone()
+        else {
+            return Err(AgentError::UnexpectedModelCompletion {
+                request_id: completion.request_id,
+                message: "no model operation is active".to_owned(),
+            });
+        };
+        if position != completion.position || request_id != completion.request_id {
+            return Err(AgentError::UnexpectedModelCompletion {
+                request_id: completion.request_id,
+                message: format!(
+                    "active model operation is request {request_id} at turn {}, step {}",
+                    position.turn, position.step
+                ),
+            });
+        }
+        let llm_runtime = llm_runtime.ok_or_else(|| AgentError::UnexpectedModelCompletion {
+            request_id: request_id.clone(),
+            message: "completion arrived without an attached LLM runtime".to_owned(),
+        })?;
+
+        let drafts = match completion.outcome {
+            Ok(LlmStreamOutcome::Assistant {
+                content,
+                usage,
+                finish_reason,
+            }) => {
+                let has_tool_calls = content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolCall { .. }));
+                let assistant_event_id = event_source.next_event_id();
+                let message_id = message_id_from_event(&assistant_event_id)?;
+                let message = Message {
+                    id: message_id,
+                    role: Role::Assistant,
+                    source: MessageSource::model(
+                        llm_runtime.request_config().provider.clone(),
+                        llm_runtime.request_config().model.clone(),
+                    ),
+                    content,
+                };
+                let mut drafts = vec![
+                    NewSessionEvent::new(
+                        assistant_event_id,
+                        event_source.now(),
+                        SessionEventPayload::AssistantMessage(AssistantMessage {
+                            request_id: request_id.clone(),
+                            message,
+                            usage,
+                        }),
+                    )
+                    .in_step(position.turn, position.step),
+                ];
+
+                match finish_reason {
+                    FinishReason::Completed if !has_tool_calls => drafts.push(
+                        NewSessionEvent::new(
+                            event_source.next_event_id(),
+                            event_source.now(),
+                            SessionEventPayload::StepEnded(StepEnded {
+                                reason: StepEndReason::Completed,
+                            }),
+                        )
+                        .in_step(position.turn, position.step),
+                    ),
+                    FinishReason::MaxTokens if !has_tool_calls => {
+                        drafts.push(
+                            NewSessionEvent::new(
+                                event_source.next_event_id(),
+                                event_source.now(),
+                                SessionEventPayload::StepEnded(StepEnded {
+                                    reason: StepEndReason::MaxTokens,
+                                }),
+                            )
+                            .in_step(position.turn, position.step),
+                        );
+                        drafts.push(
+                            NewSessionEvent::new(
+                                event_source.next_event_id(),
+                                event_source.now(),
+                                SessionEventPayload::TurnEnded(TurnEnded {
+                                    reason: TurnEndReason::MaxTokens,
+                                }),
+                            )
+                            .in_turn(position.turn),
+                        );
+                    }
+                    FinishReason::Completed | FinishReason::MaxTokens => {
+                        // Tool-call assistants remain in the open step. Batch 08
+                        // will resolve ToolDefinition metadata, persist tool/call,
+                        // and continue the tool pipeline without a duplicate model
+                        // request.
+                    }
+                    FinishReason::Error | FinishReason::Cancelled => {
+                        return Err(AgentError::UnexpectedModelCompletion {
+                            request_id,
+                            message: "stream assembler returned an assistant outcome with a failure finish reason"
+                                .to_owned(),
+                        });
+                    }
+                    _ => {
+                        return Err(AgentError::UnexpectedModelCompletion {
+                            request_id,
+                            message:
+                                "stream assembler returned an unsupported assistant finish reason"
+                                    .to_owned(),
+                        });
+                    }
+                }
+                drafts
+            }
+            Ok(LlmStreamOutcome::Failure {
+                failure,
+                finish_reason,
+            }) => Self::model_failure_drafts(
+                event_source,
+                position,
+                request_id.clone(),
+                failure,
+                finish_reason,
+            )?,
+            Ok(_) => {
+                return Err(AgentError::UnexpectedModelCompletion {
+                    request_id,
+                    message: "stream assembler returned an unsupported outcome variant".to_owned(),
+                });
+            }
+            Err(failure) => {
+                let finish_reason = if failure.code == ErrorCode::Cancelled {
+                    FinishReason::Cancelled
+                } else {
+                    FinishReason::Error
+                };
+                Self::model_failure_drafts(
+                    event_source,
+                    position,
+                    request_id.clone(),
+                    failure,
+                    finish_reason,
+                )?
+            }
+        };
+
+        self.append_validated(store, drafts).await?;
+        self.state.active_operation = None;
+        drop(self.active_llm_task.take());
+        Ok(())
+    }
+
+    fn model_failure_drafts(
+        event_source: &dyn AgentEventSource,
+        position: StepPosition,
+        request_id: RequestId,
+        failure: PortableError,
+        finish_reason: FinishReason,
+    ) -> Result<Vec<NewSessionEvent>, AgentError> {
+        let (step_reason, turn_reason) = match finish_reason {
+            FinishReason::Error => (StepEndReason::ModelError, TurnEndReason::Error),
+            FinishReason::Cancelled => (StepEndReason::Cancelled, TurnEndReason::Cancelled),
+            FinishReason::Completed | FinishReason::MaxTokens => {
+                return Err(AgentError::UnexpectedModelCompletion {
+                    request_id,
+                    message: "failure outcome carried a non-failure finish reason".to_owned(),
+                });
+            }
+            _ => {
+                return Err(AgentError::UnexpectedModelCompletion {
+                    request_id,
+                    message: "failure outcome carried an unsupported finish reason".to_owned(),
+                });
+            }
+        };
+
+        Ok(vec![
+            NewSessionEvent::new(
+                event_source.next_event_id(),
+                event_source.now(),
+                SessionEventPayload::ModelFailed(ModelFailed {
+                    request_id,
+                    failure,
+                }),
+            )
+            .in_step(position.turn, position.step),
+            NewSessionEvent::new(
+                event_source.next_event_id(),
+                event_source.now(),
+                SessionEventPayload::StepEnded(StepEnded {
+                    reason: step_reason,
+                }),
+            )
+            .in_step(position.turn, position.step),
+            NewSessionEvent::new(
+                event_source.next_event_id(),
+                event_source.now(),
+                SessionEventPayload::TurnEnded(TurnEnded {
+                    reason: turn_reason,
+                }),
+            )
+            .in_turn(position.turn),
+        ])
+    }
+
     pub(crate) async fn run(
         mut self,
         store: Arc<dyn SessionStore>,
         event_source: Arc<dyn AgentEventSource>,
+        llm_runtime: Option<AgentLlmRuntime>,
+        self_tx: mpsc::Sender<MailboxMessage>,
         mut rx: mpsc::Receiver<MailboxMessage>,
     ) -> AgentExit {
         while let Some(message) = rx.recv().await {
@@ -226,8 +566,41 @@ impl AgentActor {
                 MailboxMessage::Snapshot { reply } => {
                     let _ = reply.send(self.state.clone());
                 }
+                MailboxMessage::LlmCompleted(completion) => {
+                    if let Err(error) = self
+                        .handle_llm_completion(
+                            store.as_ref(),
+                            event_source.as_ref(),
+                            llm_runtime.as_ref(),
+                            completion,
+                        )
+                        .await
+                    {
+                        self.abort_active_llm_task();
+                        return AgentExit {
+                            reason: AgentExitReason::Fatal(error),
+                            final_state: self.state,
+                        };
+                    }
+                    if let Err(error) = self
+                        .advance_runtime(
+                            store.as_ref(),
+                            event_source.as_ref(),
+                            llm_runtime.as_ref(),
+                            &self_tx,
+                        )
+                        .await
+                    {
+                        self.abort_active_llm_task();
+                        return AgentExit {
+                            reason: AgentExitReason::Fatal(error),
+                            final_state: self.state,
+                        };
+                    }
+                }
                 MailboxMessage::Command { command, reply } => {
                     if matches!(&command, AgentCommand::Shutdown) {
+                        self.abort_active_llm_task();
                         let _ = reply.send(Ok(AgentCommandAck::Shutdown));
                         return AgentExit {
                             reason: AgentExitReason::ShutdownRequested,
@@ -247,6 +620,7 @@ impl AgentActor {
                     let _ = reply.send(result);
 
                     if terminal {
+                        self.abort_active_llm_task();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(
                                 fatal.expect("terminal command failure must carry an error"),
@@ -255,14 +629,19 @@ impl AgentActor {
                         };
                     }
 
-                    // Command acknowledgement is deliberately sent before the
-                    // deterministic driver consumes the accepted Inbox work.
-                    // Receipt therefore means durable acceptance, not completion.
+                    // Command acknowledgement is deliberately sent before accepted
+                    // Inbox work is consumed or an external model operation starts.
                     if should_drive
                         && let Err(error) = self
-                            .converge_driver_boundary(store.as_ref(), event_source.as_ref())
+                            .advance_runtime(
+                                store.as_ref(),
+                                event_source.as_ref(),
+                                llm_runtime.as_ref(),
+                                &self_tx,
+                            )
                             .await
                     {
+                        self.abort_active_llm_task();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(error),
                             final_state: self.state,
@@ -272,10 +651,18 @@ impl AgentActor {
             }
         }
 
+        self.abort_active_llm_task();
         AgentExit {
             reason: AgentExitReason::MailboxClosed,
             final_state: self.state,
         }
+    }
+
+    fn abort_active_llm_task(&mut self) {
+        if let Some(task) = self.active_llm_task.take() {
+            task.abort();
+        }
+        self.state.active_operation = None;
     }
 
     async fn handle_command(
@@ -298,7 +685,7 @@ impl AgentActor {
                 keep_inbox: _,
             } => Err(AgentError::UnsupportedOperation {
                 operation: "cancel",
-                reason: "active external-operation cancellation and inbox discard convergence are introduced with the capability driver",
+                reason: "active-operation cancellation and inbox discard convergence are introduced after the first LLM vertical slice",
             }),
             AgentCommand::Shutdown => unreachable!("shutdown is handled before command dispatch"),
         }
@@ -514,4 +901,20 @@ impl AgentActor {
 
         Ok(preview_committed)
     }
+}
+
+fn request_id_from_event(event_id: &EventId) -> Result<RequestId, AgentError> {
+    RequestId::new(format!("req:model:{event_id}")).map_err(|error| {
+        AgentError::InvalidModelRequest {
+            message: format!("failed to derive RequestId from EventId: {error}"),
+        }
+    })
+}
+
+fn message_id_from_event(event_id: &EventId) -> Result<MessageId, AgentError> {
+    MessageId::new(format!("msg:model:{event_id}")).map_err(|error| {
+        AgentError::InvalidDurableMutation {
+            message: format!("failed to derive assistant MessageId from EventId: {error}"),
+        }
+    })
 }

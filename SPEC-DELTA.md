@@ -598,3 +598,96 @@ Batch 06 intentionally does not decide:
 - how active operation cancellation converges durable state.
 
 These remain explicit future work rather than hidden assumptions in the first driver implementation.
+
+# Batch 07 Spec Delta
+
+## 1. New generic BlobStore crate
+
+The architecture previously specified `BlobStore` semantically but did not assign it a clean Rust crate. Batch 07 introduces `harness-storage` rather than placing the abstraction in `harness-llm` or making `harness-agent` depend on the concrete `harness-storage-local` crate.
+
+`SessionStore` remains in `harness-session` for v0.1. This avoids a disruptive migration of the already-stable event-log API.
+
+## 2. Stream sequence becomes a branded counter
+
+`StreamSeq` is added to `harness-types` and follows the same JavaScript-safe integer bound as other cross-language counters. Normalized LLM streams start at 1 and increment by exactly one.
+
+## 3. In-process LLM seam is not the wire protocol
+
+`LlmProvider` is the Rust Core capability seam. It returns a runtime-neutral `futures_core::Stream` of normalized events. The future JSON-RPC Provider Host will adapt process/wire messages into this seam.
+
+No JSON-RPC types are introduced in Batch 07.
+
+## 4. Exact request snapshot ordering is executable
+
+The Batch 07 Agent enforces:
+
+```text
+ModelRequest build
+    -> JSON snapshot serialization
+    -> BlobStore.put
+    -> model/requested commit
+    -> provider task spawn
+```
+
+A committed `model/requested` therefore never intentionally references a snapshot that Core failed to persist.
+
+## 5. Durable recovery vs live operation overlay
+
+Immediately after `model/requested`, the durable projection correctly says the request would require interrupted-request recovery after process loss. The live actor additionally records:
+
+```text
+ActiveAgentOperation::Model
+```
+
+The deterministic driver does nothing while this overlay exists. On process restart the overlay is gone, so the existing RecoveryAnalyzer behavior becomes authoritative without introducing a new durable event.
+
+## 6. Mailbox responsiveness is now an invariant
+
+The Agent actor never awaits provider stream I/O in its receive loop. One spawned task consumes and validates the model stream and submits one internal completion message.
+
+This is the architectural prerequisite for later `steer`, cancellation, timeout, and shutdown races.
+
+## 7. Batch 07 model failure policy
+
+A provider stream failure or normalized `finish(error)` produces:
+
+```text
+model/failed
+step/ended(model-error)
+turn/ended(error)
+```
+
+A normalized cancelled finish produces the cancelled Step/Turn reasons.
+
+Batch 07 does not implement ordinary intra-process model retry policy. An interrupted request recovered after process restart may enter a new attempt because the open step becomes ReadyForModel again; its attempt number is incremented from durable history.
+
+## 8. Tool-call assistant boundary
+
+If the assistant contains no ToolCall block, Batch 07 can end the step immediately.
+
+If ToolCall blocks are present, only `assistant/message` is committed and the open step is left for Batch 08. This is intentional: side-effect classification and `tool/call` persistence require `ToolDefinition` / ToolRegistry, which do not belong in the LLM layer.
+
+The existing `open_step_assistant_message` projection prevents duplicate model requests while this state is deferred.
+
+## 9. Known deferred items
+
+Batch 07 intentionally does not freeze:
+
+- cancellation signal transport into `LlmProvider`;
+- timeout policy;
+- runtime chunk/UI event fanout;
+- model retry policy beyond restart convergence;
+- dynamic PromptRegistry assembly;
+- ToolRegistry-derived model tool schemas;
+- out-of-process Provider Protocol;
+- durable representation of provider-specific response metadata.
+
+These omissions do not weaken the durable ordering or single-writer invariants introduced here.
+
+## 10. Batch 06 clippy cleanup
+
+The unused test helper `id<T>()` in `harness-agent/src/loop_driver.rs` is removed. Batch 07 expects `cargo clippy --workspace --all-targets -- -D warnings` to be part of acceptance.
+
+## 11. Finish/cancellation normalization
+
+`finish(cancelled)` is valid only with `ErrorCode::Cancelled`; `finish(error)` may carry other normalized error codes but not `Cancelled`. The in-process provider stream is required to terminate after its terminal Finish event. Timeout enforcement is still deferred.

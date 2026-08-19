@@ -130,3 +130,26 @@ The reference MVP SHOULD provide:
 - a filesystem content-addressed BlobStore.
 
 The specification does not require a specific production storage engine.
+
+## 14. Batch 07 BlobStore Rust placement
+
+The Rust reference implementation introduces a small `harness-storage` crate for storage seams that are not Session-event-log semantics. `BlobStore` lives in this crate; `SessionStore` remains in `harness-session` for v0.1.
+
+```rust
+#[async_trait]
+pub trait BlobStore: Send + Sync {
+    async fn put(
+        &self,
+        bytes: Vec<u8>,
+        media_type: Option<String>,
+    ) -> Result<BlobRef, BlobStoreError>;
+
+    async fn get(&self, blob_id: &BlobId) -> Result<Vec<u8>, BlobStoreError>;
+
+    async fn verify(&self, blob: &BlobRef) -> Result<(), BlobStoreError>;
+}
+```
+
+`harness-storage-local` provides `MemoryBlobStore` as the deterministic reference backend. It uses SHA-256 content-addressed BlobIds and deduplicates equal bytes. Content-addressing is an implementation choice of this backend, not a requirement of the general BlobStore contract.
+
+A successful `model/requested` append MUST occur only after the referenced request snapshot has been accepted by BlobStore.

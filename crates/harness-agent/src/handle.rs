@@ -1,7 +1,9 @@
 use harness_types::{AgentInstanceId, CancelCause, InboxTarget, Message, SessionId};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{AgentCommand, AgentCommandAck, AgentHandleError, AgentState, SendReceipt};
+use crate::{
+    AgentCommand, AgentCommandAck, AgentHandleError, AgentState, LlmCompletion, SendReceipt,
+};
 
 pub(crate) enum MailboxMessage {
     Command {
@@ -11,6 +13,7 @@ pub(crate) enum MailboxMessage {
     Snapshot {
         reply: oneshot::Sender<AgentState>,
     },
+    LlmCompleted(LlmCompletion),
 }
 
 /// Cloneable application-facing handle for one live Agent actor.

@@ -178,14 +178,6 @@ mod tests {
     use super::{DriverPlan, plan_next};
     use crate::{AgentPhase, AgentState, ExecutionGate, ResumeDecision};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
-
     fn message(id_value: &str) -> Message {
         Message {
             id: MessageId::new(id_value).unwrap(),
@@ -204,6 +196,7 @@ mod tests {
             gate: ExecutionGate::Open,
             resume,
             projection,
+            active_operation: None,
             wake_requested: wake,
         }
     }

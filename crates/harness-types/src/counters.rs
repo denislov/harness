@@ -92,6 +92,7 @@ macro_rules! define_counter {
 define_counter!(EventSeq, "EventSeq");
 define_counter!(TurnNo, "TurnNo");
 define_counter!(StepNo, "StepNo");
+define_counter!(StreamSeq, "StreamSeq");
 
 #[cfg(test)]
 mod tests {

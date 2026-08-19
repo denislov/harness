@@ -351,3 +351,34 @@ Send
 ```
 
 The next implementation batch may therefore focus on `harness-llm` and an in-process fake model operation without changing Turn/Step entry semantics.
+
+## 14. Batch 07 storage abstraction crate amendment
+
+Beginning with Batch 07, the Rust workspace also contains:
+
+```text
+crates/
+├── harness-storage/        # generic BlobStore abstraction
+└── harness-storage-local/  # MemorySessionStore + MemoryBlobStore
+```
+
+`harness-storage` depends only on `harness-types` plus async/error support. `harness-storage-local` implements the abstraction and may also implement `harness-session` storage contracts.
+
+The relevant dependency direction is now:
+
+```text
+harness-types
+    ├──> harness-session
+    ├──> harness-storage
+    └──> harness-llm
+
+harness-session ----┐
+harness-storage ----┼──> harness-agent
+harness-llm --------┘
+
+harness-session ----┐
+harness-storage ----┼──> harness-storage-local
+harness-types ------┘
+```
+
+`harness-agent` never depends on the concrete `harness-storage-local` backend outside tests.
