@@ -648,3 +648,151 @@ The retained event prefix is the exact snapshot used by the actor for local pre-
 
 No public type is added. `V1SessionProjector` now enforces uniqueness of `SessionEvent.eventId`
 within one Session.
+
+# Batch 06 API Surface
+
+**Baseline repository:** `denislov/harness`
+
+**Baseline commit:** `228aa80798d0c0c8b26c64ea674073124df7aef9`
+
+**Scope:** deterministic Agent Turn/Step driver through the first external model boundary.
+
+## Public additions
+
+### `harness-agent`
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentDriverBoundary {
+    ReadyForModel {
+        position: harness_session::StepPosition,
+    },
+}
+```
+
+```rust
+impl AgentState {
+    pub fn driver_boundary(&self) -> Option<AgentDriverBoundary>;
+}
+```
+
+`driver_boundary()` returns `ReadyForModel` only when all of the following are true:
+
+```text
+AgentPhase == Running at turn/step
+ResumeDecision == ContinueOpenStep at the same turn/step
+SessionProjection.open_step_assistant_message == None
+```
+
+The boundary is process-local. No new SessionEvent is introduced.
+
+### `harness-session`
+
+`SessionProjection` gains one replay-derived field:
+
+```rust
+pub open_step_assistant_message: Option<MessageId>
+```
+
+The projector sets it when the authoritative `assistant/message` for the open step is observed and clears it when that step ends.
+
+This field prevents an ambiguous `ContinueOpenStep` from being interpreted as another model request after an assistant message was already committed.
+
+## Behavioral changes
+
+### `spawn_agent`
+
+Before publishing `AgentHandle`, startup now performs two convergence passes:
+
+```text
+bootstrap
+  -> recovery-only convergence
+  -> deterministic driver convergence
+  -> publish handle
+```
+
+The deterministic pass may:
+
+- start a new turn from durable waking Inbox work;
+- continue an open turn;
+- start a step;
+- durably claim Inbox input;
+- append model-visible `user/message` events;
+- close an exhausted open turn;
+- park at `ReadyForModel`.
+
+It does not invoke an LLM, Tool, ProviderHost, network service, or approval system.
+
+### `AgentCommand::Send`
+
+The Rust v0.1 Agent Inbox now rejects messages whose `role` is not `Role::User` before durable enqueue.
+
+`MessageSource` remains independent from `Role`; plugin/runtime provenance may still enter the Inbox as a user-role message.
+
+### Wake latch
+
+`AgentState::wake_requested` is refreshed from the durable pending Inbox projection after each committed mutation instead of being manually left set after a claim.
+
+A consumed waking input therefore clears the latch unless another pending Inbox item still has `wakeup=true`.
+
+## Deterministic driver batching
+
+For a new turn's first step, the actor commits one atomic batch in this order:
+
+```text
+turn/started
+inbox/claimed(next-turn)?
+step/started
+user/message(primary next-turn)?
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+Selection rule:
+
+```text
+at most one next-turn item
++
+all currently pending next-step items
+```
+
+Model-visible order is primary `next-turn` first, then `next-step` FIFO.
+
+When an already open pre-model step receives more `next-step` input, the same step receives:
+
+```text
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+without another `step/started` event.
+
+## Internal additions
+
+`harness-agent/src/loop_driver.rs` introduces crate-private planning types:
+
+```text
+DriverPlan
+PlannedInboxInput
+plan_next(AgentState)
+```
+
+These are intentionally not public API. They separate deterministic planning from actor-owned durable mutation.
+
+## Explicitly deferred
+
+Batch 06 does not implement:
+
+- actual LLM invocation;
+- `model/requested` creation from the live driver;
+- post-assistant step finalization;
+- Tool execution or Tool recovery retries;
+- active-operation cancellation;
+- prompt/tool catalog assembly.
+
+A post-assistant open step is deliberately deferred rather than mapped to `ReadyForModel`.
+
+## Durable compatibility
+
+Batch 06 introduces **no new SessionEvent type and no schema-version change**.
+
+`open_step_assistant_message` is projection state derived from existing `assistant/message` and `step/ended` facts.

@@ -350,3 +350,160 @@ cargo test --workspace
 `AgentEventSource` is intentionally injected. Batch 05 tests use deterministic sources;
 production UUID/ULID policy should be supplied later by `harness-runtime` rather than hard-coded
 into the Agent domain crate.
+
+# Harness API Batch 06
+
+Batch 06 implements the first deterministic Agent driver slice:
+
+```text
+Send
+ -> durable inbox/enqueued acknowledgement
+ -> wake
+ -> turn/started
+ -> inbox/claimed
+ -> step/started
+ -> user/message
+ -> ReadyForModel
+```
+
+It is based on GitHub repository `denislov/harness`, baseline commit:
+
+```text
+228aa80798d0c0c8b26c64ea674073124df7aef9
+```
+
+The user's Batch 05 unused-import cleanup is already reflected in the source used to prepare this package.
+
+## Files in this batch
+
+```text
+crates/harness-agent/src/
+├── actor.rs              replacement
+├── driver_tests.rs       new
+├── lib.rs                replacement
+├── loop_driver.rs        new
+└── state.rs              replacement
+
+projector.patch           patch for harness-session/src/projector.rs
+runtime.patch             patch for harness-agent/src/runtime.rs
+
+spec/
+├── agent-lifecycle.md
+├── invariants.md
+└── rust-core-layout.md
+
+API-SURFACE.md
+SPEC-DELTA.md
+apply.sh
+```
+
+No Cargo dependency change is required.
+
+## Recommended application
+
+From any directory:
+
+```bash
+./apply.sh /path/to/your/harness
+```
+
+Or, if the Batch 06 directory is inside the repository root:
+
+```bash
+./harness-api-batch-06/apply.sh .
+```
+
+The script first runs `git apply --check` for both narrow patches. If either patch does not match your current tree, it exits before modifying files.
+
+## Manual application
+
+If you prefer to apply manually:
+
+```bash
+git apply projector.patch
+git apply runtime.patch
+
+cp crates/harness-agent/src/actor.rs      <repo>/crates/harness-agent/src/actor.rs
+cp crates/harness-agent/src/state.rs      <repo>/crates/harness-agent/src/state.rs
+cp crates/harness-agent/src/lib.rs        <repo>/crates/harness-agent/src/lib.rs
+cp crates/harness-agent/src/loop_driver.rs <repo>/crates/harness-agent/src/loop_driver.rs
+cp crates/harness-agent/src/driver_tests.rs <repo>/crates/harness-agent/src/driver_tests.rs
+```
+
+The paths above assume commands are run from the extracted Batch 06 directory; replace `<repo>` with your repository root.
+
+Also replace the three spec files in `spec/`.
+
+## Validation
+
+Run:
+
+```bash
+cargo fmt --all
+
+cargo check \
+  -p harness-session \
+  -p harness-storage-local \
+  -p harness-agent
+
+cargo test \
+  -p harness-session \
+  -p harness-storage-local \
+  -p harness-agent
+
+cargo check --workspace
+cargo test --workspace
+```
+
+For a warning-clean build, additionally run:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+if Clippy is installed in your local toolchain.
+
+## Expected behavioral changes
+
+After:
+
+```rust
+handle.followup(message).await?;
+```
+
+`SendReceipt` still acknowledges the durable `inbox/enqueued` event itself. The actor then advances deterministically before processing the next mailbox item. A subsequent `snapshot()` should therefore observe the input already claimed into an open step and the actor parked at `ReadyForModel`.
+
+For the first message in a new Session, the expected durable sequence is:
+
+```text
+1 session/created
+2 inbox/enqueued
+3 turn/started
+4 inbox/claimed
+5 step/started
+6 user/message
+```
+
+A `next-step` `inject` on an idle Agent remains pending because it has `wakeup=false`. When a future waking input starts a turn, that primary `next-turn` input is entered first, followed by queued `next-step` input.
+
+A second `next-turn` input arriving while the current step is parked at `ReadyForModel` remains queued for a future turn.
+
+## Safety correction included in Batch 06
+
+`ResumeDecision::ContinueOpenStep` alone is not sufficient evidence that a new model request should start. The step may already contain an authoritative assistant message and merely be missing its final `step/ended` convergence.
+
+Therefore `SessionProjection` now exposes replay-derived:
+
+```rust
+open_step_assistant_message: Option<MessageId>
+```
+
+and `ReadyForModel` is returned only when this field is `None`.
+
+Post-assistant step finalization is intentionally deferred to the next batch rather than risking duplicate model execution after restart.
+
+## Not implemented yet
+
+Batch 06 does not execute an LLM. It does not create a live `model/requested` event, run tools, finalize a post-assistant step, or implement active-operation cancellation.
+
+The intended next boundary is an in-process fake/model operation launched from `ReadyForModel` without blocking actor mailbox progress.

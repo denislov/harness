@@ -436,3 +436,165 @@ The live actor is then exposed with a blocked ExecutionGate and quiescent durabl
 
 `AgentCommand::Cancel` remains in the command vocabulary but returns an explicit unsupported
 operation until the driver owns cancellation tokens and durable convergence semantics.
+
+# Batch 06 Spec Delta
+
+This file records only decisions added or tightened by Batch 06 relative to the Batch 05 specification baseline.
+
+## 1. Deterministic driver is separated from capability execution
+
+The Agent driver is split conceptually into:
+
+```text
+deterministic durable transition
+        |
+        v
+external-operation boundary
+        |
+        v
+capability execution
+```
+
+Batch 06 implements only the first part and stops at `ReadyForModel`.
+
+The deterministic part may write SessionEvents but MUST NOT invoke an LLM, Tool provider, ProviderHost, approval service, or other external capability.
+
+## 2. `ReadyForModel` is not durable state
+
+No `ready-for-model` SessionEvent is added.
+
+The Rust implementation derives the boundary from:
+
+```text
+AgentPhase::Running(turn, step)
+ResumeDecision::ContinueOpenStep(same turn, same step)
+SessionProjection.open_step_assistant_message == None
+```
+
+This allows process restart to rediscover the same boundary by replay.
+
+## 3. Projection gains an open-step assistant marker
+
+`SessionProjection` now exposes:
+
+```rust
+pub open_step_assistant_message: Option<MessageId>
+```
+
+The marker is set by `assistant/message` and cleared by `step/ended`.
+
+This is not a durable schema addition. It is replay-derived state required to distinguish these two structurally different cases:
+
+```text
+open step before assistant
+    -> eligible for ReadyForModel
+
+open step after assistant
+    -> must not issue another model request
+```
+
+Batch 06 defers the second case to the post-assistant convergence batch.
+
+## 4. Step-entry Inbox mutation is atomic with model-visible entry
+
+When Inbox input is consumed into a step, `inbox/claimed` and the corresponding `user/message` MUST be committed in the same atomic SessionStore append batch.
+
+For a newly opened turn:
+
+```text
+turn/started
+inbox/claimed(next-turn)?
+step/started
+user/message(next-turn)?
+[inbox/claimed(next-step), user/message(next-step)]*
+```
+
+This eliminates the crash state:
+
+```text
+inbox item durably claimed
+but model-visible user/message missing
+```
+
+## 5. Inbox batching rule is frozen for v0.1 reference behavior
+
+At a new turn's first step:
+
+```text
+claim <= 1 next-turn
+claim all currently pending next-step
+```
+
+At an already open pre-model step:
+
+```text
+claim all currently pending next-step
+claim 0 next-turn
+```
+
+Within model-visible history, the primary next-turn message precedes next-step messages; next-step FIFO order is preserved.
+
+## 6. Open-turn continuation rule
+
+For `ContinueOpenTurn`:
+
+- if the turn has never started a step, one `next-turn` message may be used as the primary input;
+- if the turn has already completed at least one step, only `next-step` work can continue that turn;
+- if no such continuation exists, Core appends `turn/ended(completed)`;
+- a pending `next-turn` item remains for a future turn.
+
+## 7. Wake latch becomes fully projection-derived after commits
+
+`wake_requested` is refreshed after every committed actor mutation from remaining pending Inbox items whose `wakeup` flag is true.
+
+Consequences:
+
+```text
+accepted waking input
+    -> wake_requested = true
+
+same input claimed and no other wake pending
+    -> wake_requested = false
+
+future next-turn wake remains queued while current step runs
+    -> wake_requested remains true
+```
+
+## 8. Handle publication occurs after deterministic startup convergence
+
+`spawn_agent` now performs:
+
+```text
+bootstrap
+recovery convergence
+deterministic driver convergence
+publish AgentHandle
+```
+
+A restarted Session with durable waking Inbox input may therefore already be at `ReadyForModel` when the caller first receives its handle.
+
+No external provider call occurs before handle publication.
+
+## 9. Agent Inbox role constraint
+
+The Rust v0.1 actor rejects `Send` messages whose role is not `Role::User` before `inbox/enqueued` is committed.
+
+This prevents a durably accepted Inbox item from later poisoning `user/message` projection during driver entry.
+
+## 10. Mailbox responsiveness is now an architectural requirement
+
+Future external LLM/Tool waits MUST NOT require the mutable actor owner to remain unavailable for mailbox processing for the duration of the wait.
+
+Batch 06 establishes the park boundary necessary for later capability operations to run without redefining Turn/Step persistence.
+
+## 11. Deferred semantics
+
+Batch 06 intentionally does not decide:
+
+- how `ModelRequest` is assembled;
+- how an LLM operation is spawned and correlated back to the actor;
+- how a post-assistant open step is finalized;
+- how Tool-result continuation opens the next step;
+- how active operation cancellation converges durable state.
+
+These remain explicit future work rather than hidden assumptions in the first driver implementation.
