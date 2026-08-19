@@ -24,7 +24,7 @@ pub(crate) enum ToolDriverPlan {
     Dispatch {
         position: StepPosition,
         call: PendingToolCall,
-        registration: ToolRegistration,
+        registration: Box<ToolRegistration>,
         attempt: u32,
         idempotency_key: Option<IdempotencyKey>,
     },
@@ -222,7 +222,7 @@ pub(crate) fn plan_tool_boundary(
         return Ok(ToolDriverPlan::Dispatch {
             position,
             call: pending,
-            registration,
+            registration: Box::new(registration),
             attempt,
             idempotency_key: Some(previous.data.idempotency_key),
         });
@@ -247,7 +247,7 @@ pub(crate) fn plan_tool_boundary(
         PolicyDecision::Allow => Ok(ToolDriverPlan::Dispatch {
             position,
             call: pending,
-            registration,
+            registration: Box::new(registration),
             attempt: 1,
             idempotency_key: None,
         }),

@@ -597,3 +597,296 @@ The external provider future has no SessionStore access. Only the Agent actor tr
 ## Tool-call boundary
 
 Batch 07 understands normalized ToolCall blocks at the LLM stream layer, but does not yet own `ToolDefinition` metadata or the Tool pipeline. Therefore an assistant containing one or more ToolCall blocks is persisted as the authoritative `assistant/message` and the step remains open. Existing Session projection state prevents a second model request. Batch 08 starts from exactly this state.
+
+# Harness API Batch 08
+
+Batch 08 completes the first in-process vertical slice:
+
+```text
+user -> LLM -> Tool -> LLM -> final answer
+```
+
+It is based on GitHub `denislov/harness` main commit:
+
+```text
+3743501c59baa8be891c7f22f3482ab5b07a92c3
+```
+
+## Scope
+
+This batch implements `harness-tools` and connects Tool execution to the existing Batch 07 Agent/LLM runtime.
+
+New domain/runtime pieces:
+
+```text
+harness-tools
+├── ToolDefinition
+├── ToolRegistration
+├── ToolRegistry
+├── ToolArgumentValidator
+├── ToolPolicy / PolicyDecision
+├── ToolInvocation
+└── ToolExecutor
+
+harness-agent
+├── AgentToolRuntime
+├── ToolDriverPlan
+├── ActiveAgentOperation::Tool
+├── ReadyForTools
+├── external Tool task -> mailbox completion
+└── spawn_agent_with_capabilities
+```
+
+Session projection gains replay-derived open-step Tool scheduling state and `StepEndReason::ToolContinuation`.
+
+## Deliberate Batch 08 limits
+
+- ToolCalls execute sequentially in assistant-message order.
+- `parallelSafe` is modeled but parallel scheduling is deferred.
+- `PolicyDecision::Ask` fails closed as a denied pre-dispatch Tool result until an approval surface exists.
+- No Provider Protocol / subprocess Tool provider is introduced yet; `ToolExecutor` is the in-process domain seam.
+- Tool cancellation and timeout enforcement remain deferred.
+- A JSON-schema engine is not selected. Every Tool registration must supply a Core-side `ToolArgumentValidator`.
+
+## Apply
+
+From the extracted Batch 08 directory:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script verifies Git blob SHA values for all modified Batch 07 files before writing anything. If your working tree no longer matches the referenced Batch 07 baseline, it stops rather than applying a fuzzy patch.
+
+## Verify
+
+Run:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The reference integration test is:
+
+```text
+harness-agent::tool_tests::user_llm_tool_llm_final_answer_vertical_slice
+```
+
+It verifies the durable sequence:
+
+```text
+session/created
+inbox/enqueued
+turn/started
+inbox/claimed
+step/started
+user/message
+model/requested
+assistant/message
+ tool/call
+ tool/dispatched
+ tool/result
+step/ended(tool-continuation)
+step/started
+model/requested
+assistant/message
+step/ended(completed)
+turn/ended(completed)
+```
+
+It also verifies that the first ModelRequest receives the ToolRegistry catalog and that the second ModelRequest contains the projected ToolResult.
+
+## Files changed
+
+The apply script modifies or creates files under:
+
+```text
+crates/harness-tools/
+crates/harness-agent/
+crates/harness-session/
+spec/
+```
+
+See `API-SURFACE.md` and `SPEC-DELTA.md` for the stable API and normative semantic changes.
+
+# Batch 08.1
+
+> Maintenance rebuild of Batch 08. Rust/spec payload is unchanged. `apply.py` is corrected to uniquely target the step-start projector reset; see `FIX-NOTE.md`.
+
+# Harness API Batch 08
+
+Batch 08 completes the first in-process vertical slice:
+
+```text
+user -> LLM -> Tool -> LLM -> final answer
+```
+
+It is based on GitHub `denislov/harness` main commit:
+
+```text
+3743501c59baa8be891c7f22f3482ab5b07a92c3
+```
+
+## Scope
+
+This batch implements `harness-tools` and connects Tool execution to the existing Batch 07 Agent/LLM runtime.
+
+New domain/runtime pieces:
+
+```text
+harness-tools
+├── ToolDefinition
+├── ToolRegistration
+├── ToolRegistry
+├── ToolArgumentValidator
+├── ToolPolicy / PolicyDecision
+├── ToolInvocation
+└── ToolExecutor
+
+harness-agent
+├── AgentToolRuntime
+├── ToolDriverPlan
+├── ActiveAgentOperation::Tool
+├── ReadyForTools
+├── external Tool task -> mailbox completion
+└── spawn_agent_with_capabilities
+```
+
+Session projection gains replay-derived open-step Tool scheduling state and `StepEndReason::ToolContinuation`.
+
+## Deliberate Batch 08 limits
+
+- ToolCalls execute sequentially in assistant-message order.
+- `parallelSafe` is modeled but parallel scheduling is deferred.
+- `PolicyDecision::Ask` fails closed as a denied pre-dispatch Tool result until an approval surface exists.
+- No Provider Protocol / subprocess Tool provider is introduced yet; `ToolExecutor` is the in-process domain seam.
+- Tool cancellation and timeout enforcement remain deferred.
+- A JSON-schema engine is not selected. Every Tool registration must supply a Core-side `ToolArgumentValidator`.
+
+## Apply
+
+From the extracted Batch 08 directory:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script verifies Git blob SHA values for all modified Batch 07 files before writing anything. If your working tree no longer matches the referenced Batch 07 baseline, it stops rather than applying a fuzzy patch.
+
+## Verify
+
+Run:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The reference integration test is:
+
+```text
+harness-agent::tool_tests::user_llm_tool_llm_final_answer_vertical_slice
+```
+
+It verifies the durable sequence:
+
+```text
+session/created
+inbox/enqueued
+turn/started
+inbox/claimed
+step/started
+user/message
+model/requested
+assistant/message
+ tool/call
+ tool/dispatched
+ tool/result
+step/ended(tool-continuation)
+step/started
+model/requested
+assistant/message
+step/ended(completed)
+turn/ended(completed)
+```
+
+It also verifies that the first ModelRequest receives the ToolRegistry catalog and that the second ModelRequest contains the projected ToolResult.
+
+## Files changed
+
+The apply script modifies or creates files under:
+
+```text
+crates/harness-tools/
+crates/harness-agent/
+crates/harness-session/
+spec/
+```
+
+See `API-SURFACE.md` and `SPEC-DELTA.md` for the stable API and normative semantic changes.
+
+# Harness Batch 08.2 Hotfix
+
+Apply this only after Batch 08/08.1 has been applied and your workspace matches the synced GitHub Batch 08 baseline.
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script guards the exact current Git blob SHA of:
+
+- `crates/harness-agent/src/actor.rs`
+- `crates/harness-agent/src/loop_driver.rs`
+
+It stages all text transformations in memory before writing either file.
+
+After applying, run:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+This hotfix intentionally contains no Batch 09 work.
+
+# Harness Batch 08.3 Hotfix
+
+This package applies two narrowly-scoped fixes to the already-applied Batch 08 code on GitHub `main` commit `424bba4f78bbcb051e7686e93b0d23e9ff2c2e63`.
+
+## Apply
+
+From this extracted directory:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script verifies Git blob SHAs before modifying either file and stages all text changes in memory before writing anything.
+
+Expected baseline blobs:
+
+```text
+crates/harness-session/src/projector.rs
+41f4e640ef79ab5ac5d05bf399dd7374b8f4608e
+
+crates/harness-agent/src/tool_driver.rs
+be96a5c9fde7e420175f22b6a2ea31776531ed28
+```
+
+## Acceptance
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+See `FIX-NOTE.md` for the rationale.

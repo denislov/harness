@@ -1285,17 +1285,9 @@ mod tests {
                 &session_id,
                 12,
                 SessionEventPayload::StepEnded(StepEnded {
-                    reason: StepEndReason::Completed,
+                    reason: StepEndReason::ToolContinuation,
                 }),
                 Some((turn(1), Some(step(1)))),
-            ),
-            commit(
-                &session_id,
-                13,
-                SessionEventPayload::TurnEnded(TurnEnded {
-                    reason: TurnEndReason::Completed,
-                }),
-                Some((turn(1), None)),
             ),
         ];
 
@@ -1321,15 +1313,19 @@ mod tests {
             other => panic!("expected tool-result block, got {other:?}"),
         }
 
-        assert_eq!(projection.lifecycle.open_turn, None);
+        assert_eq!(projection.lifecycle.open_turn, Some(turn(1)));
         assert_eq!(projection.lifecycle.open_step, None);
-        assert_eq!(projection.lifecycle.last_ended_turn, Some(turn(1)));
+        assert_eq!(projection.lifecycle.last_ended_turn, None);
         assert_eq!(
             projection.lifecycle.last_ended_step,
             Some(StepPosition {
                 turn: turn(1),
                 step: step(1),
             })
+        );
+        assert_eq!(
+            projection.lifecycle.last_ended_step_reason,
+            Some(StepEndReason::ToolContinuation)
         );
         assert!(projection.pending_model_request.is_none());
         assert!(projection.pending_tool_calls.is_empty());

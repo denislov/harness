@@ -691,3 +691,139 @@ The unused test helper `id<T>()` in `harness-agent/src/loop_driver.rs` is remove
 ## 11. Finish/cancellation normalization
 
 `finish(cancelled)` is valid only with `ErrorCode::Cancelled`; `finish(error)` may carry other normalized error codes but not `Cancelled`. The in-process provider stream is required to terminate after its terminal Finish event. Timeout enforcement is still deferred.
+
+# Batch 08 Spec Delta
+
+Batch 08 is based on `denislov/harness` commit `3743501c59baa8be891c7f22f3482ab5b07a92c3`.
+
+## 1. Tool runtime becomes executable
+
+`harness-tools` now owns provider-neutral Tool definitions and execution seams. The crate remains below Agent and does not gain SessionStore or Tokio authority.
+
+A Tool registration combines:
+
+```text
+ToolDefinition
++ ToolExecutor
++ ToolArgumentValidator
+```
+
+Policy remains separately composed through `ToolPolicy`.
+
+## 2. Model-visible Tool catalog authority
+
+When both LLM and Tool runtimes are attached, ToolRegistry is the sole source for `ModelToolSpec` generation. `ModelRequestConfig.tools` must be empty in this mode.
+
+Only:
+
+```text
+name
+description
+inputSchema
+```
+
+are model-visible. Provider binding, side-effect class, idempotency support and policy remain Core authority.
+
+## 3. Logical calls precede dispatch
+
+For one authoritative assistant message, Core persists every announced `tool/call` before dispatching the first Tool.
+
+This freezes the logical call set before external side effects begin and allows recovery to reconstruct the batch without relying on process memory.
+
+## 4. Dispatch boundary
+
+For an allowed Tool:
+
+```text
+validate
+policy
+assign InvocationId / idempotencyKey
+commit tool/dispatched
+set ActiveAgentOperation::Tool
+spawn Tool future
+```
+
+The Tool future has no SessionStore access. It returns one normalized completion through the Agent mailbox.
+
+## 5. Ordering
+
+Batch 08 executes ToolCalls sequentially in authoritative assistant-message order. This deliberately sacrifices parallel throughput while the first durable Tool semantics are being exercised.
+
+`parallelSafe` remains in ToolDefinition for a later scheduler.
+
+## 6. Policy and validation
+
+Unknown Tool, validation failure, and policy denial terminate before provider dispatch and produce a model-visible Tool result.
+
+`PolicyDecision::Ask` fails closed in Batch 08 because approval UI/service semantics are not implemented yet. It is represented as a denied Tool outcome and MUST NOT dispatch.
+
+## 7. Idempotency contract
+
+`idempotent-write` Tool registration requires keyed idempotency support from its executor.
+
+Automatic retry preserves:
+
+```text
+ToolCallId
+providerId
+idempotencyKey
+```
+
+and changes:
+
+```text
+InvocationId
+attempt += 1
+```
+
+`non-idempotent-write` remains non-retryable after a durable dispatch without terminal result.
+
+## 8. Retry exhaustion
+
+After the configured automatic attempt budget:
+
+```text
+read-only
+    -> ToolOutcome::Error(TOOL_RETRY_EXHAUSTED)
+
+idempotent-write
+    -> ToolOutcome::Unknown
+
+non-idempotent-write
+    -> recovery block path, never automatic retry exhaustion
+```
+
+A terminal result after a previous dispatch uses the latest dispatch InvocationId.
+
+## 9. Tool continuation
+
+A new `StepEndReason` value is introduced:
+
+```text
+tool-continuation
+```
+
+It is durable and means:
+
+> this Turn owes another model step because Tool results have become model-visible.
+
+Therefore:
+
+```text
+tool/result*
+step/ended(tool-continuation)
+step/started(next)
+model/requested
+```
+
+is valid even when no Inbox item is pending.
+
+## 10. Projection additions
+
+SessionProjector reconstructs open-step ToolCall order plus recorded/completed sets. Tool scheduling never sorts opaque ToolCallIds to determine execution order.
+
+`LifecycleProjection.last_ended_step_reason` allows the deterministic driver to distinguish an ordinary completed step from an immediate Tool-continuation boundary.
+
+## 11. Spec housekeeping
+
+The Batch 07 additions had duplicated section/invariant numbers in `agent-lifecycle.md` and `invariants.md`. Batch 08 renumbers those appendices before adding new Tool sections; this is editorial and does not change Batch 07 semantics.

@@ -1049,3 +1049,171 @@ MailboxMessage::LlmCompleted(...)
 ```
 
 This is not exposed through `AgentHandle`.
+
+# Batch 08 Public API Surface
+
+## `harness-tools`
+
+```rust
+pub struct ToolDefinition {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
+    pub parallel_safe: bool,
+    pub side_effect: SideEffectClass,
+    pub default_timeout_ms: u64,
+}
+
+pub struct ToolInvocationPosition {
+    pub turn: TurnNo,
+    pub step: StepNo,
+}
+
+pub struct ToolInvocation {
+    pub invocation_id: InvocationId,
+    pub call_id: ToolCallId,
+    pub session_id: SessionId,
+    pub position: ToolInvocationPosition,
+    pub tool_name: String,
+    pub arguments_json: JsonText,
+    pub attempt: u32,
+    pub idempotency_key: IdempotencyKey,
+}
+
+pub enum IdempotencySupport {
+    None,
+    Keyed,
+}
+
+pub trait ToolExecutor: Send + Sync {
+    fn provider_id(&self) -> &ProviderId;
+    fn idempotency_support(&self) -> IdempotencySupport;
+    fn invoke(&self, invocation: ToolInvocation) -> ToolExecutionFuture;
+}
+
+pub trait ToolArgumentValidator: Send + Sync {
+    fn validate(
+        &self,
+        definition: &ToolDefinition,
+        arguments_json: &JsonText,
+    ) -> Result<(), ToolArgumentValidationError>;
+}
+
+pub enum PolicyDecision {
+    Allow,
+    Deny { reason: String },
+    Ask { reason: String, risk: String },
+}
+
+pub trait ToolPolicy: Send + Sync {
+    fn evaluate(&self, input: &ToolPolicyInput) -> PolicyDecision;
+}
+
+pub struct ToolRegistration { /* definition + executor + validator */ }
+pub struct ToolRegistry { /* unique name -> registration */ }
+```
+
+An `idempotent-write` registration is rejected unless its executor declares `IdempotencySupport::Keyed`.
+
+## `harness-session`
+
+New durable enum value:
+
+```rust
+StepEndReason::ToolContinuation
+```
+
+New replay-derived projection types:
+
+```rust
+pub struct OpenStepToolCall {
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub arguments_json: JsonText,
+}
+
+pub struct OpenStepToolProjection {
+    pub announced: Vec<OpenStepToolCall>,
+    pub recorded: BTreeSet<ToolCallId>,
+    pub completed: BTreeSet<ToolCallId>,
+}
+```
+
+`SessionProjection` adds:
+
+```rust
+pub open_step_tools: OpenStepToolProjection
+```
+
+`LifecycleProjection` adds:
+
+```rust
+pub last_ended_step_reason: Option<StepEndReason>
+```
+
+These fields are projections only; no new SessionEvent is introduced for `ReadyForTools` or tool scheduling state.
+
+## `harness-agent`
+
+```rust
+pub struct AgentToolRuntime { /* registry + policy + retry budget */ }
+
+impl AgentToolRuntime {
+    pub fn new(
+        registry: Arc<ToolRegistry>,
+        policy: Arc<dyn ToolPolicy>,
+        max_automatic_attempts: u32,
+    ) -> Result<Self, AgentToolRuntimeError>;
+
+    pub fn model_tool_specs(&self) -> Vec<ModelToolSpec>;
+}
+```
+
+New process-local boundary:
+
+```rust
+AgentDriverBoundary::ReadyForTools { position: StepPosition }
+```
+
+New process-local active operation:
+
+```rust
+ActiveAgentOperation::Tool {
+    position: StepPosition,
+    call_id: ToolCallId,
+    invocation_id: InvocationId,
+    attempt: u32,
+}
+```
+
+New composition entrypoint:
+
+```rust
+pub async fn spawn_agent_with_capabilities(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    llm_runtime: AgentLlmRuntime,
+    tool_runtime: AgentToolRuntime,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError>;
+```
+
+In this composition mode `ModelRequestConfig.tools` must be empty because the ToolRegistry is the authoritative model-visible catalog.
+
+## Internal Agent seams
+
+The following are intentionally crate-private in Batch 08:
+
+```text
+ToolDriverPlan
+ToolCompletion
+spawn_tool_operation
+AgentActor::advance_tool_boundary
+AgentActor::handle_tool_completion
+```
+
+They are implementation seams, not stable application APIs yet.
