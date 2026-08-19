@@ -18,7 +18,7 @@ use crate::loop_driver::{DriverPlan, PlannedInboxInput, plan_next};
 use crate::{
     ActiveAgentOperation, AgentBootstrap, AgentCommand, AgentCommandAck, AgentError,
     AgentEventSource, AgentLlmRuntime, AgentPhase, AgentState, AgentToolRuntime, LlmCompletion,
-    MailboxMessage, RecoveryAnalyzer, ResumeDecision, SendReceipt, ToolCompletion,
+    MailboxMessage, RecoveryAnalyzer, ResumeDecision, SendReceipt,
 };
 
 mod tool_support;
@@ -719,6 +719,7 @@ impl AgentActor {
                                 store.as_ref(),
                                 event_source.as_ref(),
                                 llm_runtime.as_ref(),
+                                tool_runtime.as_ref(),
                                 &self_tx,
                             )
                             .await

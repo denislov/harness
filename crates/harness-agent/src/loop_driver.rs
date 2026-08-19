@@ -182,14 +182,14 @@ fn next_step_number(state: &AgentState, turn: TurnNo) -> Result<StepNo, AgentErr
 
 #[cfg(test)]
 mod tests {
-    use harness_session::{PendingInboxItem, SessionProjection, StepPosition};
+    use harness_session::{PendingInboxItem, SessionProjection, StepEndReason, StepPosition};
     use harness_types::{
         AgentInstanceId, ContentBlock, EventSeq, InboxTarget, Message, MessageId, MessageSource,
         Role, SessionId, StepNo, TurnNo,
     };
 
     use super::{DriverPlan, plan_next};
-    use crate::{AgentPhase, AgentState, ExecutionGate, ResumeDecision};
+    use crate::{AgentDriverBoundary, AgentPhase, AgentState, ExecutionGate, ResumeDecision};
 
     fn message(id_value: &str) -> Message {
         Message {
