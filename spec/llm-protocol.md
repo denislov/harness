@@ -220,3 +220,12 @@ A normalized `finish(cancelled)` MUST carry a `PortableError` whose code is `CAN
 An `LlmProvider` stream MUST terminate after emitting its terminal `Finish` event. The reference operation consumes the stream through that terminal boundary and treats a missing `Finish` before stream termination as `PROVIDER_PROTOCOL_ERROR`. Timeout enforcement for a provider that never terminates remains deferred to the capability timeout layer.
 
 `LlmProvider::stream` MUST return promptly and MUST NOT perform blocking I/O before returning the Stream. Asynchronous provider setup belongs in the returned stream implementation. This preserves actor/runtime responsiveness even when the reference runtime is configured with a single Tokio worker.
+
+## 17. Batch 08 ToolRegistry-authoritative request catalog
+
+When an Agent is spawned with both LLM and Tool capability runtimes, the ToolRegistry is the authoritative source of model-visible tool definitions. Core derives `ModelToolSpec` values from registered ToolDefinition values for each request.
+
+In this mode `ModelRequestConfig.tools` MUST be empty at composition time; mixing a static catalog with the runtime registry is rejected. The exact derived catalog remains part of each immutable ModelRequest snapshot, so later registry changes do not rewrite historical model inputs.
+
+Only `name`, `description`, and `inputSchema` cross the model-visible catalog boundary. Side-effect class, provider binding, idempotency support, policy, and credentials remain Core authority and are not delegated to the model.
+

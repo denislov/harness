@@ -267,6 +267,7 @@ Allowed v0.1 reason vocabulary:
 
 ```text
 completed
+tool-continuation
 model-error
 cancelled
 blocked
@@ -336,3 +337,12 @@ Projection MUST be a pure function of durable session state plus explicitly vers
 LLM text/reasoning/tool-call deltas are RuntimeEvents in v0.1. They MAY be displayed live but are not required for session reconstruction.
 
 If a later version makes stream replay durable, it MUST preserve the authoritative final `assistant/message` semantics rather than requiring every consumer to reconstruct the final message from chunks.
+
+## 7. Batch 08 Tool continuation projection
+
+The v0.1 reference projector additionally reconstructs the ordered ToolCalls announced by the authoritative assistant message for the currently open step, together with the sets that have been durably recorded and completed.
+
+This projection is replay-derived and is not a new SessionEvent. It allows Core to resume Tool scheduling in assistant-message order without depending on ToolCall identifier ordering.
+
+`step/ended(tool-continuation)` is valid only for a step that announced at least one ToolCall and has no unresolved logical ToolCall. A ToolCall-producing step MUST NOT use ordinary `completed` once its Tool results have been recorded.
+

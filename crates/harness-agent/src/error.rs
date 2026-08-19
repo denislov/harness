@@ -1,5 +1,5 @@
 use harness_session::SessionStoreError;
-use harness_types::{ErrorCode, EventSeq, RequestId, SessionId};
+use harness_types::{ErrorCode, EventSeq, RequestId, SessionId, ToolCallId};
 use thiserror::Error;
 
 /// Stable Agent-layer failure surfaced to command callers and task supervision.
@@ -24,6 +24,9 @@ pub enum AgentError {
     #[error("invalid model request: {message}")]
     InvalidModelRequest { message: String },
 
+    #[error("invalid Tool runtime state: {message}")]
+    InvalidToolRuntime { message: String },
+
     #[error("invalid durable mutation: {message}")]
     InvalidDurableMutation { message: String },
 
@@ -33,6 +36,12 @@ pub enum AgentError {
     #[error("unexpected completion for model request {request_id}: {message}")]
     UnexpectedModelCompletion {
         request_id: RequestId,
+        message: String,
+    },
+
+    #[error("unexpected completion for ToolCall {call_id}: {message}")]
+    UnexpectedToolCompletion {
+        call_id: ToolCallId,
         message: String,
     },
 
@@ -68,8 +77,10 @@ impl AgentError {
             Self::OwnershipLost { .. }
                 | Self::BlobStorage { .. }
                 | Self::InvalidModelRequest { .. }
+                | Self::InvalidToolRuntime { .. }
                 | Self::StorageContractViolation { .. }
                 | Self::UnexpectedModelCompletion { .. }
+                | Self::UnexpectedToolCompletion { .. }
         )
     }
 }

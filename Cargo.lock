@@ -170,6 +170,7 @@ dependencies = [
  "harness-session",
  "harness-storage",
  "harness-storage-local",
+ "harness-tools",
  "harness-types",
  "serde_json",
  "thiserror",
@@ -235,6 +236,12 @@ dependencies = [
 [[package]]
 name = "harness-tools"
 version = "0.1.0"
+dependencies = [
+ "harness-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "harness-types"

@@ -3,6 +3,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     AgentCommand, AgentCommandAck, AgentHandleError, AgentState, LlmCompletion, SendReceipt,
+    ToolCompletion,
 };
 
 pub(crate) enum MailboxMessage {
@@ -14,6 +15,7 @@ pub(crate) enum MailboxMessage {
         reply: oneshot::Sender<AgentState>,
     },
     LlmCompleted(LlmCompletion),
+    ToolCompleted(ToolCompletion),
 }
 
 /// Cloneable application-facing handle for one live Agent actor.

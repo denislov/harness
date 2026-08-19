@@ -382,3 +382,57 @@ harness-types ------┘
 ```
 
 `harness-agent` never depends on the concrete `harness-storage-local` backend outside tests.
+
+## 15. Batch 08 Tool runtime layout
+
+`harness-tools` is now implemented with the following reference modules:
+
+```text
+harness-tools/src/
+├── definition.rs
+├── executor.rs
+├── invocation.rs
+├── policy.rs
+├── registry.rs
+├── validation.rs
+└── lib.rs
+```
+
+`harness-agent` adds:
+
+```text
+harness-agent/src/
+├── tool_driver.rs
+├── tool_operation.rs
+├── tool_runtime.rs
+├── tool_tests.rs
+└── actor/
+    └── tool_support.rs
+```
+
+The dependency direction is:
+
+```text
+harness-types -----> harness-tools
+harness-tools -----> harness-agent
+harness-llm -------> harness-agent
+harness-session ---> harness-agent
+```
+
+`harness-tools` does not depend on Agent, SessionStore, Tokio, or Provider Host. The in-process Tool executor returns a generic Send Future; Tokio task spawning remains an Agent execution-layer concern.
+
+The first vertical slice is complete when the integration test demonstrates:
+
+```text
+user
+ -> model requests read_file
+ -> durable tool/call
+ -> durable tool/dispatched
+ -> Fake read_file executor
+ -> durable tool/result
+ -> step/ended(tool-continuation)
+ -> second model request sees ToolResult
+ -> final assistant answer
+ -> turn/ended(completed)
+```
+

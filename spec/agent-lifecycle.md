@@ -406,7 +406,7 @@ The architectural rule for the next capability batch is:
 
 Batch 06 establishes the durable and process-local boundary needed to implement that rule without changing Session semantics later.
 
-## 17. Batch 07 active external operation
+## 21. Batch 07 active external operation
 
 The live Agent state now distinguishes durable recovery interpretation from a process-local operation that is actually in flight.
 
@@ -421,7 +421,7 @@ Live actor overlay:
 
 While the live overlay exists, Core MUST NOT execute startup-style interrupted-request recovery and MUST NOT issue a second model request. If the process disappears, the overlay disappears and the durable recovery decision becomes authoritative.
 
-## 18. LLM completion mailbox
+## 22. LLM completion mailbox
 
 One LLM provider future runs outside the Agent mailbox loop. It emits a single normalized completion into the actor mailbox after consuming and validating the provider stream.
 
@@ -430,3 +430,49 @@ The actor alone translates that completion into durable `assistant/message` or `
 Commands accepted while the LLM future is pending are still serialized and persisted by the actor. In particular, a `next-step` steer accepted before model completion remains queued and may become input to the following step after the current assistant response converges.
 
 Shutdown aborts the process-local LLM task. An already committed `model/requested` without a terminal durable result is intentionally recoverable on the next process start.
+
+## 23. Batch 08 Tool boundary
+
+An open step whose authoritative assistant message contains ToolCall blocks is parked at the process-local boundary:
+
+```text
+ReadyForTools { turn, step }
+```
+
+The boundary is replay-derived from the open-step assistant/tool projection and is not a SessionEvent. `RecoverToolBatch` is also surfaced as the same live Tool boundary when no capability operation is currently active.
+
+The deterministic Tool planner may record logical `tool/call` facts, produce pre-dispatch terminal outcomes, commit a `tool/dispatched` boundary, or close a fully completed Tool step. It does not await external Tool execution.
+
+## 24. Live Tool operation
+
+A concrete Tool attempt is represented process-locally as:
+
+```text
+ActiveAgentOperation::Tool {
+    position,
+    callId,
+    invocationId,
+    attempt
+}
+```
+
+Core MUST commit `tool/dispatched` before setting this live overlay and spawning the external Tool future. The Tool future reports one normalized completion through the Agent mailbox. It has no SessionStore authority.
+
+If the process disappears, the live overlay disappears and the durable `tool/dispatched` event is interpreted by `RecoveryAnalyzer` according to SideEffectClass.
+
+## 25. Batch 08 Tool continuation
+
+ToolCalls are executed sequentially in assistant-message order in the v0.1 reference runtime. When all calls have terminal durable results, the current step ends with `tool-continuation`.
+
+A `tool-continuation` step end is an explicit durable reason that the same turn owes another model step even if no Inbox item is pending:
+
+```text
+assistant/tool calls
+    -> tool/result*
+    -> step/ended(tool-continuation)
+    -> step/started(next)
+    -> model/requested
+```
+
+Pending `next-step` Inbox input is claimed into that next step before the model request. Pending `next-turn` input remains reserved for a later turn.
+

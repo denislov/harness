@@ -17,9 +17,11 @@ use crate::llm_operation::spawn_llm_operation;
 use crate::loop_driver::{DriverPlan, PlannedInboxInput, plan_next};
 use crate::{
     ActiveAgentOperation, AgentBootstrap, AgentCommand, AgentCommandAck, AgentError,
-    AgentEventSource, AgentLlmRuntime, AgentPhase, AgentState, LlmCompletion, MailboxMessage,
-    RecoveryAnalyzer, ResumeDecision, SendReceipt,
+    AgentEventSource, AgentLlmRuntime, AgentPhase, AgentState, AgentToolRuntime, LlmCompletion,
+    MailboxMessage, RecoveryAnalyzer, ResumeDecision, SendReceipt, ToolCompletion,
 };
+
+mod tool_support;
 
 /// Single-owner process-local Agent actor state.
 ///
@@ -30,6 +32,7 @@ pub struct AgentActor {
     state: AgentState,
     history: Vec<SessionEvent>,
     active_llm_task: Option<JoinHandle<()>>,
+    active_tool_task: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +56,7 @@ impl AgentActor {
             state: AgentState::from_bootstrap(instance_id, bootstrap),
             history,
             active_llm_task: None,
+            active_tool_task: None,
         }
     }
 
@@ -98,7 +102,7 @@ impl AgentActor {
                                 kind: RecoveryBlockKind::UnknownToolOutcome,
                                 call_id: proposal.call.data.call_id,
                                 invocation_id: proposal.dispatch.data.invocation_id,
-                                reason: "process restarted after a non-idempotent Tool dispatch without a durable terminal result".to_owned(),
+                                reason: "a non-idempotent Tool dispatch has no durable terminal result; the external outcome is unknown".to_owned(),
                             }),
                         )
                         .in_step(position.turn, position.step),
@@ -152,9 +156,19 @@ impl AgentActor {
                     return Ok(());
                 }
                 DriverPlan::Deferred => {
-                    self.state.phase = AgentPhase::Idle {
-                        last_turn: self.state.projection.lifecycle.last_ended_turn,
-                    };
+                    self.state.phase =
+                        if let Some(position) = self.state.projection.lifecycle.open_step {
+                            AgentPhase::Running {
+                                turn: position.turn,
+                                step: Some(position.step),
+                            }
+                        } else if let Some(turn) = self.state.projection.lifecycle.open_turn {
+                            AgentPhase::Running { turn, step: None }
+                        } else {
+                            AgentPhase::Idle {
+                                last_turn: self.state.projection.lifecycle.last_ended_turn,
+                            }
+                        };
                     return Ok(());
                 }
                 DriverPlan::StartNewTurn { turn, step, inputs } => {
@@ -202,7 +216,8 @@ impl AgentActor {
                 }
                 DriverPlan::Park(boundary) => {
                     match boundary {
-                        crate::AgentDriverBoundary::ReadyForModel { position } => {
+                        crate::AgentDriverBoundary::ReadyForModel { position }
+                        | crate::AgentDriverBoundary::ReadyForTools { position } => {
                             self.state.phase = AgentPhase::Running {
                                 turn: position.turn,
                                 step: Some(position.step),
@@ -215,33 +230,66 @@ impl AgentActor {
         }
     }
 
-    /// Runs deterministic state transitions, then starts at most one external LLM
-    /// operation. The external future is spawned and reports completion back through
-    /// the actor mailbox; it is never awaited while the actor owns the mailbox loop.
+    /// Advances deterministic Core state and starts at most one external capability
+    /// operation. Provider/Tool futures report completion back through the mailbox;
+    /// the actor never awaits them while it owns command processing.
     pub(crate) async fn advance_runtime(
         &mut self,
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
         llm_runtime: Option<&AgentLlmRuntime>,
+        tool_runtime: Option<&AgentToolRuntime>,
         self_tx: &mpsc::Sender<MailboxMessage>,
     ) -> Result<(), AgentError> {
         if self.state.active_operation.is_some() {
             return Ok(());
         }
 
-        self.converge_driver_boundary(store, event_source).await?;
+        loop {
+            if matches!(
+                &self.state.resume,
+                ResumeDecision::RecoverInterruptedModelRequest { .. }
+                    | ResumeDecision::PersistRecoveryBlock { .. }
+            ) {
+                self.converge_startup(store, event_source).await?;
+            }
 
-        let Some(llm_runtime) = llm_runtime else {
-            return Ok(());
-        };
-        let Some(crate::AgentDriverBoundary::ReadyForModel { position }) =
-            self.state.driver_boundary()
-        else {
-            return Ok(());
-        };
+            self.converge_driver_boundary(store, event_source).await?;
 
-        self.start_model_operation(store, event_source, llm_runtime, position, self_tx)
-            .await
+            match self.state.driver_boundary() {
+                Some(crate::AgentDriverBoundary::ReadyForModel { position }) => {
+                    let Some(llm_runtime) = llm_runtime else {
+                        return Ok(());
+                    };
+                    self.start_model_operation(
+                        store,
+                        event_source,
+                        llm_runtime,
+                        tool_runtime,
+                        position,
+                        self_tx,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Some(crate::AgentDriverBoundary::ReadyForTools { position }) => {
+                    let Some(tool_runtime) = tool_runtime else {
+                        return Ok(());
+                    };
+                    match self
+                        .advance_tool_boundary(store, event_source, tool_runtime, position, self_tx)
+                        .await?
+                    {
+                        tool_support::ToolAdvance::Progressed => continue,
+                        tool_support::ToolAdvance::Started
+                        | tool_support::ToolAdvance::Deferred => {
+                            return Ok(());
+                        }
+                    }
+                }
+                None => return Ok(()),
+            }
+        }
     }
 
     async fn start_model_operation(
@@ -249,6 +297,7 @@ impl AgentActor {
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
         llm_runtime: &AgentLlmRuntime,
+        tool_runtime: Option<&AgentToolRuntime>,
         position: StepPosition,
         self_tx: &mpsc::Sender<MailboxMessage>,
     ) -> Result<(), AgentError> {
@@ -262,8 +311,11 @@ impl AgentActor {
         let attempt = self.next_model_attempt(position)?;
         let request_event_id = event_source.next_event_id();
         let request_id = request_id_from_event(&request_event_id)?;
-        let request = llm_runtime
-            .request_config()
+        let mut request_config = llm_runtime.request_config().clone();
+        if let Some(tool_runtime) = tool_runtime {
+            request_config.tools = tool_runtime.model_tool_specs();
+        }
+        let request = request_config
             .build(
                 request_id.clone(),
                 self.state.session_id.clone(),
@@ -558,6 +610,7 @@ impl AgentActor {
         store: Arc<dyn SessionStore>,
         event_source: Arc<dyn AgentEventSource>,
         llm_runtime: Option<AgentLlmRuntime>,
+        tool_runtime: Option<AgentToolRuntime>,
         self_tx: mpsc::Sender<MailboxMessage>,
         mut rx: mpsc::Receiver<MailboxMessage>,
     ) -> AgentExit {
@@ -576,7 +629,7 @@ impl AgentActor {
                         )
                         .await
                     {
-                        self.abort_active_llm_task();
+                        self.abort_active_tasks();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(error),
                             final_state: self.state,
@@ -587,11 +640,40 @@ impl AgentActor {
                             store.as_ref(),
                             event_source.as_ref(),
                             llm_runtime.as_ref(),
+                            tool_runtime.as_ref(),
                             &self_tx,
                         )
                         .await
                     {
-                        self.abort_active_llm_task();
+                        self.abort_active_tasks();
+                        return AgentExit {
+                            reason: AgentExitReason::Fatal(error),
+                            final_state: self.state,
+                        };
+                    }
+                }
+                MailboxMessage::ToolCompleted(completion) => {
+                    if let Err(error) = self
+                        .handle_tool_completion(store.as_ref(), event_source.as_ref(), completion)
+                        .await
+                    {
+                        self.abort_active_tasks();
+                        return AgentExit {
+                            reason: AgentExitReason::Fatal(error),
+                            final_state: self.state,
+                        };
+                    }
+                    if let Err(error) = self
+                        .advance_runtime(
+                            store.as_ref(),
+                            event_source.as_ref(),
+                            llm_runtime.as_ref(),
+                            tool_runtime.as_ref(),
+                            &self_tx,
+                        )
+                        .await
+                    {
+                        self.abort_active_tasks();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(error),
                             final_state: self.state,
@@ -600,7 +682,7 @@ impl AgentActor {
                 }
                 MailboxMessage::Command { command, reply } => {
                     if matches!(&command, AgentCommand::Shutdown) {
-                        self.abort_active_llm_task();
+                        self.abort_active_tasks();
                         let _ = reply.send(Ok(AgentCommandAck::Shutdown));
                         return AgentExit {
                             reason: AgentExitReason::ShutdownRequested,
@@ -620,7 +702,7 @@ impl AgentActor {
                     let _ = reply.send(result);
 
                     if terminal {
-                        self.abort_active_llm_task();
+                        self.abort_active_tasks();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(
                                 fatal.expect("terminal command failure must carry an error"),
@@ -641,7 +723,7 @@ impl AgentActor {
                             )
                             .await
                     {
-                        self.abort_active_llm_task();
+                        self.abort_active_tasks();
                         return AgentExit {
                             reason: AgentExitReason::Fatal(error),
                             final_state: self.state,
@@ -651,17 +733,18 @@ impl AgentActor {
             }
         }
 
-        self.abort_active_llm_task();
+        self.abort_active_tasks();
         AgentExit {
             reason: AgentExitReason::MailboxClosed,
             final_state: self.state,
         }
     }
 
-    fn abort_active_llm_task(&mut self) {
+    fn abort_active_tasks(&mut self) {
         if let Some(task) = self.active_llm_task.take() {
             task.abort();
         }
+        self.abort_active_tool_task();
         self.state.active_operation = None;
     }
 

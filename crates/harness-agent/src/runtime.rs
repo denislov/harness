@@ -7,7 +7,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     AgentActor, AgentBootstrapError, AgentBootstrapper, AgentError, AgentEventSource, AgentExit,
-    AgentHandle, AgentLlmRuntime,
+    AgentHandle, AgentLlmRuntime, AgentToolRuntime,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +29,11 @@ impl Default for AgentActorConfig {
 pub enum AgentSpawnError {
     #[error("agent mailbox capacity must be greater than zero")]
     InvalidMailboxCapacity,
+
+    #[error(
+        "spawn_agent_with_capabilities requires ModelRequestConfig.tools to be empty; the ToolRegistry is authoritative"
+    )]
+    StaticToolCatalogConflict,
 
     #[error(transparent)]
     Bootstrap(#[from] AgentBootstrapError),
@@ -79,7 +84,16 @@ pub async fn spawn_agent(
     event_source: Arc<dyn AgentEventSource>,
     config: AgentActorConfig,
 ) -> Result<SpawnedAgent, AgentSpawnError> {
-    spawn_agent_inner(instance_id, session_id, store, event_source, None, config).await
+    spawn_agent_inner(
+        instance_id,
+        session_id,
+        store,
+        event_source,
+        None,
+        None,
+        config,
+    )
+    .await
 }
 
 /// Bootstraps one Session and attaches the first provider-neutral LLM runtime.
@@ -102,6 +116,35 @@ pub async fn spawn_agent_with_llm(
         store,
         event_source,
         Some(llm_runtime),
+        None,
+        config,
+    )
+    .await
+}
+
+/// Bootstraps one Session with both LLM and Tool capability runtimes.
+///
+/// The ToolRegistry is the authoritative model-visible tool catalog in this mode;
+/// callers therefore provide an LLM request config with an empty static tool list.
+pub async fn spawn_agent_with_capabilities(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    llm_runtime: AgentLlmRuntime,
+    tool_runtime: AgentToolRuntime,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError> {
+    if !llm_runtime.request_config().tools.is_empty() {
+        return Err(AgentSpawnError::StaticToolCatalogConflict);
+    }
+    spawn_agent_inner(
+        instance_id,
+        session_id,
+        store,
+        event_source,
+        Some(llm_runtime),
+        Some(tool_runtime),
         config,
     )
     .await
@@ -113,6 +156,7 @@ async fn spawn_agent_inner(
     store: Arc<dyn SessionStore>,
     event_source: Arc<dyn AgentEventSource>,
     llm_runtime: Option<AgentLlmRuntime>,
+    tool_runtime: Option<AgentToolRuntime>,
     config: AgentActorConfig,
 ) -> Result<SpawnedAgent, AgentSpawnError> {
     if config.mailbox_capacity == 0 {
@@ -138,12 +182,13 @@ async fn spawn_agent_inner(
             store.as_ref(),
             event_source.as_ref(),
             llm_runtime.as_ref(),
+            tool_runtime.as_ref(),
             &tx,
         )
         .await?;
 
     let handle = AgentHandle::new(instance_id, session_id, tx.clone());
-    let join = tokio::spawn(actor.run(store, event_source, llm_runtime, tx, rx));
+    let join = tokio::spawn(actor.run(store, event_source, llm_runtime, tool_runtime, tx, rx));
 
     Ok(SpawnedAgent {
         handle,

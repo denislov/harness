@@ -234,3 +234,64 @@ ProviderHost MUST NOT blindly restart and replay a Tool invocation.
 ## 13. v0.1 non-idempotent dispatch serialization
 
 The v0.1 Agent Tool scheduler MUST ensure that at most one `non-idempotent-write` provider dispatch is unresolved for one Agent at a time. This keeps the durable ExecutionGate representable by a single active recovery block. Read-only and idempotent Tool work may still be parallelized when their ToolDefinition permits it.
+
+## 14. Batch 08 Rust reference Tool runtime
+
+The Rust reference implementation introduces `harness-tools` as the provider-neutral Tool domain crate. It contains:
+
+```text
+ToolDefinition
+ToolRegistration
+ToolRegistry
+ToolArgumentValidator
+ToolPolicy
+ToolExecutor
+ToolInvocation
+```
+
+`ToolExecutor::invoke` represents exactly one provider attempt. It returns promptly and places asynchronous work in the returned Future. The executor does not append SessionEvents and does not own retry policy.
+
+For an `idempotent-write` Tool, registration requires an executor that declares keyed idempotency support. This prevents Core from dispatching an operation whose durable recovery contract cannot be honored.
+
+## 15. Batch 08 scheduling policy
+
+The first reference scheduler executes ToolCalls sequentially in authoritative assistant-message order. `parallelSafe` remains part of `ToolDefinition`, but concurrent Tool scheduling is deferred until deterministic result ordering and cancellation semantics are exercised by the sequential implementation.
+
+The scheduler performs the following durable sequence for an allowed call:
+
+```text
+assistant/message
+    -> tool/call
+    -> validate arguments
+    -> policy
+    -> tool/dispatched
+    -> external Tool future
+    -> tool/result
+```
+
+All ToolCalls announced by one assistant message are durably recorded before the first provider dispatch. This makes the logical call set reconstructable before any external effect begins.
+
+Policy `deny` becomes a terminal pre-dispatch `ToolOutcome::Denied`. Until an approval surface exists, policy `ask` also fails closed as a pre-dispatch denied outcome; it MUST NOT dispatch the Tool.
+
+Unknown Tool names and argument-validation failures become model-visible pre-dispatch Tool errors and do not create `tool/dispatched`.
+
+## 16. Retry-budget terminalization
+
+When a previously dispatched retry-safe Tool reaches the configured automatic-attempt budget:
+
+- `read-only` terminates with a model-visible Tool error because no external mutation is at risk;
+- `idempotent-write` terminates with `ToolOutcome::Unknown`, preserving the fact that the external mutation may already have occurred;
+- `non-idempotent-write` never reaches automatic retry-budget handling; an unresolved dispatch is recovery-blocking.
+
+A terminal outcome after a prior dispatch MUST reference the latest durable `InvocationId`.
+
+## 17. Tool continuation step boundary
+
+After every ToolCall from the authoritative assistant message has a durable terminal result, Core ends that step with:
+
+```text
+step/ended { reason: "tool-continuation" }
+```
+
+`tool-continuation` means the open turn owes an immediate next model step even when no new Inbox input exists. Tool results are already part of projected model history, so the next step can begin with `step/started` and proceed directly to a model request.
+

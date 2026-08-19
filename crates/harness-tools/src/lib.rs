@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Provider-neutral Tool domain and in-process execution seams.
+//!
+//! This crate owns Tool definitions, registry resolution, Core-side argument
+//! validation, policy decisions, and the one-attempt executor interface. It does
+//! not own Session mutation, Agent state, Provider process supervision, or retry
+//! policy.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod definition;
+mod executor;
+mod invocation;
+mod policy;
+mod registry;
+mod validation;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use definition::{ToolDefinition, ToolDefinitionError};
+pub use executor::{IdempotencySupport, ToolExecutionFuture, ToolExecutor};
+pub use invocation::{ToolInvocation, ToolInvocationError, ToolInvocationPosition};
+pub use policy::{AllowAllToolPolicy, PolicyDecision, ToolPolicy, ToolPolicyInput};
+pub use registry::{ToolRegistration, ToolRegistry, ToolRegistryError};
+pub use validation::{ToolArgumentValidationError, ToolArgumentValidator};

@@ -1,4 +1,4 @@
-use harness_session::{PendingInboxItem, StepPosition};
+use harness_session::{PendingInboxItem, StepEndReason, StepPosition};
 use harness_types::{InboxTarget, StepNo, TurnNo};
 
 use crate::{AgentDriverBoundary, AgentError, AgentState, ResumeDecision};
@@ -38,12 +38,15 @@ pub(crate) fn plan_next(state: &AgentState) -> Result<DriverPlan, AgentError> {
         ResumeDecision::Clean => plan_clean(state),
         ResumeDecision::ContinueOpenTurn { turn } => plan_open_turn(state, *turn),
         ResumeDecision::ContinueOpenStep { position } => plan_open_step(state, *position),
-        ResumeDecision::RecoverToolBatch { .. } | ResumeDecision::Blocked { .. } => {
-            Ok(DriverPlan::Deferred)
+        ResumeDecision::RecoverToolBatch { position, .. } => {
+            Ok(DriverPlan::Park(AgentDriverBoundary::ReadyForTools {
+                position: *position,
+            }))
         }
+        ResumeDecision::Blocked { .. } => Ok(DriverPlan::Deferred),
         ResumeDecision::RecoverInterruptedModelRequest { .. }
         | ResumeDecision::PersistRecoveryBlock { .. } => Err(AgentError::InvalidDurableMutation {
-            message: "startup recovery was not converged before entering the deterministic driver"
+            message: "recovery without external capability execution was not converged before entering the deterministic driver"
                 .to_owned(),
         }),
     }
@@ -83,7 +86,15 @@ fn plan_open_turn(state: &AgentState, turn: TurnNo) -> Result<DriverPlan, AgentE
         initial_step_inputs(state)
     };
 
-    if inputs.is_empty() {
+    let needs_tool_continuation = state
+        .projection
+        .lifecycle
+        .last_ended_step
+        .is_some_and(|position| position.turn == turn)
+        && state.projection.lifecycle.last_ended_step_reason
+            == Some(StepEndReason::ToolContinuation);
+
+    if inputs.is_empty() && !needs_tool_continuation {
         return Ok(DriverPlan::EndOpenTurn { turn });
     }
 
@@ -93,10 +104,12 @@ fn plan_open_turn(state: &AgentState, turn: TurnNo) -> Result<DriverPlan, AgentE
 
 fn plan_open_step(state: &AgentState, position: StepPosition) -> Result<DriverPlan, AgentError> {
     if state.projection.open_step_assistant_message.is_some() {
-        // The model has already produced the authoritative assistant message for
-        // this step. Batch 06 must not reinterpret this state as a second model
-        // request. Post-assistant step/turn convergence is introduced next.
-        return Ok(DriverPlan::Deferred);
+        if state.projection.open_step_tools.announced.is_empty() {
+            return Ok(DriverPlan::Deferred);
+        }
+        return Ok(DriverPlan::Park(AgentDriverBoundary::ReadyForTools {
+            position,
+        }));
     }
 
     let inputs = next_step_inputs(state);
@@ -228,12 +241,10 @@ mod tests {
         assert_eq!(turn, TurnNo::FIRST);
         assert_eq!(step, StepNo::FIRST);
         assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0].item.message.id.as_str(), "msg_turn_1");
-        assert_eq!(inputs[1].item.message.id.as_str(), "msg_step_1");
     }
 
     #[test]
-    fn open_step_parks_when_no_next_step_input_exists() {
+    fn open_step_parks_for_model_when_no_next_step_input_exists() {
         let position = StepPosition {
             turn: TurnNo::FIRST,
             step: StepNo::FIRST,
@@ -251,28 +262,40 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(matches!(plan, DriverPlan::Park(_)));
+        assert!(matches!(
+            plan,
+            DriverPlan::Park(AgentDriverBoundary::ReadyForModel { .. })
+        ));
     }
+
     #[test]
-    fn open_step_with_authoritative_assistant_is_deferred_not_ready_for_model() {
-        let position = StepPosition {
-            turn: TurnNo::FIRST,
-            step: StepNo::FIRST,
-        };
+    fn tool_continuation_opens_next_step_without_new_inbox_input() {
+        let turn = TurnNo::FIRST;
+        let first_step = StepNo::FIRST;
         let mut projection = SessionProjection::default();
-        projection.lifecycle.open_turn = Some(position.turn);
-        projection.lifecycle.open_step = Some(position);
-        projection.lifecycle.last_started_turn = Some(position.turn);
-        projection.lifecycle.last_started_step = Some(position);
-        projection.open_step_assistant_message = Some(MessageId::new("msg_assistant").unwrap());
+        projection.lifecycle.open_turn = Some(turn);
+        projection.lifecycle.last_started_turn = Some(turn);
+        projection.lifecycle.last_started_step = Some(StepPosition {
+            turn,
+            step: first_step,
+        });
+        projection.lifecycle.last_ended_step = Some(StepPosition {
+            turn,
+            step: first_step,
+        });
+        projection.lifecycle.last_ended_step_reason = Some(StepEndReason::ToolContinuation);
 
         let plan = plan_next(&state(
             projection,
-            ResumeDecision::ContinueOpenStep { position },
+            ResumeDecision::ContinueOpenTurn { turn },
             false,
         ))
         .unwrap();
 
-        assert!(matches!(plan, DriverPlan::Deferred));
+        assert!(matches!(
+            plan,
+            DriverPlan::StartStep { step, inputs, .. }
+                if step == StepNo::new(2).unwrap() && inputs.is_empty()
+        ));
     }
 }

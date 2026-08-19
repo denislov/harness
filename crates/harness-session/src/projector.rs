@@ -51,6 +51,7 @@ pub struct LifecycleProjection {
     pub last_ended_turn: Option<TurnNo>,
     pub last_started_step: Option<StepPosition>,
     pub last_ended_step: Option<StepPosition>,
+    pub last_ended_step_reason: Option<StepEndReason>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,12 +80,28 @@ pub struct PendingToolDispatch {
     pub data: ToolDispatched,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenStepToolCall {
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub arguments_json: JsonText,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenStepToolProjection {
+    /// ToolCalls in the exact order announced by the authoritative assistant message.
+    pub announced: Vec<OpenStepToolCall>,
+    pub recorded: BTreeSet<ToolCallId>,
+    pub completed: BTreeSet<ToolCallId>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionProjection {
     pub model_messages: Vec<Message>,
     pub inbox: InboxProjection,
     pub lifecycle: LifecycleProjection,
     pub open_step_assistant_message: Option<MessageId>,
+    pub open_step_tools: OpenStepToolProjection,
     pub last_model_request: Option<ModelRequested>,
     pub pending_model_request: Option<ModelRequested>,
     pub pending_tool_calls: BTreeMap<ToolCallId, PendingToolCall>,
@@ -253,6 +270,7 @@ impl ProjectorState {
                 self.projection.lifecycle.last_started_step = Some(position);
                 self.current_step_assistant_seen = false;
                 self.projection.open_step_assistant_message = None;
+                self.projection.open_step_tools = OpenStepToolProjection::default();
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
                 Ok(())
@@ -337,6 +355,8 @@ impl ProjectorState {
 
                 self.current_step_announced_calls =
                     collect_announced_tool_calls(event, &data.message)?;
+                self.projection.open_step_tools.announced =
+                    collect_announced_tool_call_order(&data.message);
                 self.current_step_assistant_seen = true;
                 self.projection.open_step_assistant_message = Some(data.message.id.clone());
                 self.projection.pending_model_request = None;
@@ -364,6 +384,23 @@ impl ProjectorState {
                     }
                 }
 
+                if data.reason == StepEndReason::ToolContinuation
+                    && self.projection.open_step_tools.announced.is_empty()
+                {
+                    return self.invalid(
+                        event,
+                        "tool-continuation step/end requires at least one announced ToolCall",
+                    );
+                }
+                if data.reason == StepEndReason::Completed
+                    && !self.projection.open_step_tools.announced.is_empty()
+                {
+                    return self.invalid(
+                        event,
+                        "a ToolCall-producing step must end with tool-continuation after all results are durable",
+                    );
+                }
+
                 let has_pending_for_step = self
                     .projection
                     .pending_tool_calls
@@ -381,8 +418,10 @@ impl ProjectorState {
 
                 self.projection.lifecycle.open_step = None;
                 self.projection.lifecycle.last_ended_step = Some(position);
+                self.projection.lifecycle.last_ended_step_reason = Some(data.reason);
                 self.current_step_assistant_seen = false;
                 self.projection.open_step_assistant_message = None;
+                self.projection.open_step_tools = OpenStepToolProjection::default();
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
                 Ok(())
@@ -550,6 +589,10 @@ impl ProjectorState {
         }
 
         self.current_step_recorded_calls
+            .insert(data.call_id.clone());
+        self.projection
+            .open_step_tools
+            .recorded
             .insert(data.call_id.clone());
         self.projection.pending_tool_calls.insert(
             data.call_id.clone(),
@@ -745,6 +788,10 @@ impl ProjectorState {
             }
         }
 
+        self.projection
+            .open_step_tools
+            .completed
+            .insert(data.call_id.clone());
         self.projection.pending_tool_calls.remove(&data.call_id);
         self.projection
             .pending_tool_dispatches
@@ -878,6 +925,25 @@ fn validate_assistant_message_source(
             "assistant/message source must be model",
         )),
     }
+}
+
+fn collect_announced_tool_call_order(message: &Message) -> Vec<OpenStepToolCall> {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments_json,
+            } => Some(OpenStepToolCall {
+                call_id: id.clone(),
+                name: name.clone(),
+                arguments_json: arguments_json.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn collect_announced_tool_calls(

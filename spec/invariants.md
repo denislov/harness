@@ -134,18 +134,43 @@ An external model, Tool, approval, or provider wait MUST NOT require the single 
 
 The actor must remain able to durably accept eligible future input and, once implemented, cancellation/shutdown commands while external capability work is in flight.
 
-## I-25: Model snapshot precedes model dispatch
+## I-29: Model snapshot precedes model dispatch
 
 Core MUST persist the exact provider-neutral ModelRequest snapshot in BlobStore before committing the `model/requested` event, and MUST commit `model/requested` before allowing the provider future to begin model execution.
 
-## I-26: External model I/O does not own the Agent mailbox
+## I-30: External model I/O does not own the Agent mailbox
 
 The single-owner Agent actor MUST NOT await a live LLM provider stream inside its mailbox receive loop. Provider I/O runs as an external operation and returns completion through actor message passing.
 
-## I-27: Provider completion cannot author Session state
+## I-31: Provider completion cannot author Session state
 
 An LLM provider task may report normalized stream completion only. The Agent actor remains the sole author of `assistant/message`, `model/failed`, and subsequent lifecycle events.
 
-## I-28: Live operation state is not durable recovery state
+## I-32: Live operation state is not durable recovery state
 
 A live `ActiveAgentOperation::Model` suppresses duplicate driver execution for the corresponding pending `model/requested`. After process loss, only the durable Session projection survives, so normal interrupted-model recovery applies.
+
+## I-33: Tool call set precedes external dispatch
+
+For one assistant message, every announced logical ToolCall MUST be durably represented by `tool/call` before Core crosses the external dispatch boundary for the first call in that batch.
+
+## I-34: Tool dispatch precedes external effect
+
+Core MUST commit `tool/dispatched` before invoking the Tool executor/provider. A live `ActiveAgentOperation::Tool` is only created after that commit succeeds.
+
+## I-35: Tool completion cannot author Session state
+
+A Tool executor task reports a normalized completion only. The Agent actor remains the sole author of `tool/result`, recovery blocks, and subsequent step/turn events.
+
+## I-36: Retry preserves logical identity
+
+Automatic retries of one logical ToolCall MUST preserve ToolCallId, provider binding, and idempotency key while allocating a new InvocationId and incrementing attempt by exactly one.
+
+## I-37: Tool continuation is explicit
+
+A step that produced ToolCalls MUST NOT end as ordinary `completed` after Tool results. Once every announced call has a terminal result, it ends as `tool-continuation`, which causes the same turn to open another model step even without new Inbox input.
+
+## I-38: Batch 08 Tool order is deterministic
+
+The Batch 08 reference scheduler executes ToolCalls sequentially in authoritative assistant-message order. Provider timing therefore cannot reorder durable Tool results in this implementation stage.
+

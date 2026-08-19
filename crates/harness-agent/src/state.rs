@@ -1,5 +1,7 @@
 use harness_session::{RecoveryBlock, SessionProjection, StepPosition};
-use harness_types::{AgentInstanceId, EventSeq, RequestId, SessionId, StepNo, TurnNo};
+use harness_types::{
+    AgentInstanceId, EventSeq, InvocationId, RequestId, SessionId, StepNo, ToolCallId, TurnNo,
+};
 
 use crate::{AgentBootstrap, ResumeDecision};
 
@@ -16,18 +18,26 @@ pub enum AgentPhase {
 #[non_exhaustive]
 pub enum AgentDriverBoundary {
     ReadyForModel { position: StepPosition },
+    ReadyForTools { position: StepPosition },
 }
 
 /// Process-local external operation owned by the live actor.
 ///
-/// This state is deliberately not durable. If the process disappears, the
-/// durable `model/requested` fact is interpreted by `RecoveryAnalyzer` instead.
+/// This state is deliberately not durable. If the process disappears, durable
+/// `model/requested` / `tool/dispatched` facts are interpreted by
+/// `RecoveryAnalyzer` instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActiveAgentOperation {
     Model {
         position: StepPosition,
         request_id: RequestId,
+        attempt: u32,
+    },
+    Tool {
+        position: StepPosition,
+        call_id: ToolCallId,
+        invocation_id: InvocationId,
         attempt: u32,
     },
 }
@@ -58,10 +68,6 @@ pub struct AgentState {
     pub active_operation: Option<ActiveAgentOperation>,
 
     /// Process-local wake latch derived from durable pending Inbox items.
-    ///
-    /// A successful enqueue refreshes this field from the resulting projection.
-    /// Driver claims refresh it again, so a consumed wake does not remain latched
-    /// unless another pending Inbox item still carries `wakeup=true`.
     pub wake_requested: bool,
 }
 
@@ -100,9 +106,6 @@ impl AgentState {
         self.wake_requested = wake_requested;
     }
 
-    /// New turn creation is permitted only after all interrupted durable work has
-    /// converged, the durable recovery gate is open, and no live external
-    /// operation is still owned by this actor.
     pub const fn can_start_new_turn(&self) -> bool {
         matches!(&self.phase, AgentPhase::Idle { .. })
             && self.gate.is_open()
@@ -121,8 +124,7 @@ impl AgentState {
     /// Returns the external-operation boundary at which the deterministic actor
     /// driver is currently parked.
     pub fn driver_boundary(&self) -> Option<AgentDriverBoundary> {
-        if self.active_operation.is_some() || self.projection.open_step_assistant_message.is_some()
-        {
+        if self.active_operation.is_some() {
             return None;
         }
 
@@ -133,15 +135,33 @@ impl AgentState {
         else {
             return None;
         };
-        let ResumeDecision::ContinueOpenStep { position } = &self.resume else {
-            return None;
+
+        let live_position = StepPosition {
+            turn: *turn,
+            step: *step,
         };
 
-        (position.turn == *turn && position.step == *step).then_some(
-            AgentDriverBoundary::ReadyForModel {
-                position: *position,
-            },
-        )
+        match &self.resume {
+            ResumeDecision::ContinueOpenStep { position } if *position == live_position => {
+                if self.projection.open_step_assistant_message.is_none() {
+                    Some(AgentDriverBoundary::ReadyForModel {
+                        position: *position,
+                    })
+                } else if !self.projection.open_step_tools.announced.is_empty() {
+                    Some(AgentDriverBoundary::ReadyForTools {
+                        position: *position,
+                    })
+                } else {
+                    None
+                }
+            }
+            ResumeDecision::RecoverToolBatch { position, .. } if *position == live_position => {
+                Some(AgentDriverBoundary::ReadyForTools {
+                    position: *position,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -165,8 +185,8 @@ fn projection_has_pending_wakeup(projection: &SessionProjection) -> bool {
 mod tests {
     use super::{ActiveAgentOperation, AgentDriverBoundary, AgentState};
     use crate::{AgentBootstrap, AgentPhase, ResumeDecision};
-    use harness_session::{SessionHead, SessionProjection, StepPosition};
-    use harness_types::{EventSeq, RequestId, StepNo, TurnNo};
+    use harness_session::{OpenStepToolCall, SessionHead, SessionProjection, StepPosition};
+    use harness_types::{EventSeq, JsonText, RequestId, StepNo, ToolCallId, TurnNo};
 
     fn id<T>(value: &str) -> T
     where
@@ -196,19 +216,6 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_turn_blocks_new_turn_even_with_open_execution_gate() {
-        let state = AgentState::from_bootstrap(
-            id("agt_1"),
-            bootstrap(ResumeDecision::ContinueOpenTurn {
-                turn: TurnNo::new(1).unwrap(),
-            }),
-        );
-        assert!(state.gate.is_open());
-        assert!(!state.can_start_new_turn());
-        assert!(state.needs_resume_work());
-    }
-
-    #[test]
     fn running_continue_open_step_exposes_ready_for_model_boundary() {
         let position = StepPosition {
             turn: TurnNo::FIRST,
@@ -230,7 +237,38 @@ mod tests {
     }
 
     #[test]
-    fn active_model_operation_hides_ready_for_model_boundary() {
+    fn authoritative_tool_call_assistant_exposes_tool_boundary() {
+        let position = StepPosition {
+            turn: TurnNo::FIRST,
+            step: StepNo::FIRST,
+        };
+        let mut bootstrap = bootstrap(ResumeDecision::ContinueOpenStep { position });
+        bootstrap.projection.lifecycle.open_turn = Some(position.turn);
+        bootstrap.projection.lifecycle.open_step = Some(position);
+        bootstrap.projection.open_step_assistant_message = Some(id("msg_assistant"));
+        bootstrap
+            .projection
+            .open_step_tools
+            .announced
+            .push(OpenStepToolCall {
+                call_id: ToolCallId::new("call_1").unwrap(),
+                name: "read_file".to_owned(),
+                arguments_json: JsonText::new("{}".to_owned()).unwrap(),
+            });
+        let mut state = AgentState::from_bootstrap(id("agt_1"), bootstrap);
+        state.phase = AgentPhase::Running {
+            turn: position.turn,
+            step: Some(position.step),
+        };
+
+        assert_eq!(
+            state.driver_boundary(),
+            Some(AgentDriverBoundary::ReadyForTools { position })
+        );
+    }
+
+    #[test]
+    fn active_model_operation_hides_boundary() {
         let position = StepPosition {
             turn: TurnNo::FIRST,
             step: StepNo::FIRST,

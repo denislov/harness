@@ -363,6 +363,7 @@ pub struct ToolResultRecorded {
 #[non_exhaustive]
 pub enum StepEndReason {
     Completed,
+    ToolContinuation,
     ModelError,
     Cancelled,
     Blocked,

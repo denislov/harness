@@ -10,9 +10,10 @@ pub use event::{
     ToolResultRecorded, TurnEndReason, TurnEnded, TurnStarted, UserMessage,
 };
 pub use projector::{
-    InboxProjection, LifecycleProjection, PendingInboxItem, PendingToolCall, PendingToolDispatch,
-    ProjectionError, RecoveryBlock, SESSION_PROJECTION_VERSION_V1, SessionProjection,
-    SessionProjector, StepPosition, V1SessionProjector,
+    InboxProjection, LifecycleProjection, OpenStepToolCall, OpenStepToolProjection,
+    PendingInboxItem, PendingToolCall, PendingToolDispatch, ProjectionError, RecoveryBlock,
+    SESSION_PROJECTION_VERSION_V1, SessionProjection, SessionProjector, StepPosition,
+    V1SessionProjector,
 };
 pub use store::{
     AppendResult, CreateSession, ForkSession, SessionHead, SessionStore, SessionStoreError,
