@@ -1,0 +1,11 @@
+[package]
+name = "harness-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+harness-session = { path = "../harness-session" }
+harness-types = { path = "../harness-types" }
+thiserror.workspace = true
