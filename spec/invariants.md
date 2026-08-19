@@ -94,19 +94,23 @@ Disposing a scope MUST invalidate registrations owned exclusively by that scope 
 
 No semantic behavior may depend on identifier lexical order or prefix.
 
+## I-21: EventId uniqueness within a Session
 
-## I-21: Durable Tool dispatch boundary
+Every committed `SessionEvent.eventId` MUST be unique within its Session. Projection
+MUST reject duplicate EventIds even when sequence numbers are otherwise valid.
 
-`tool/call` records logical model intent. Core MUST commit `tool/dispatched` before a Tool invocation crosses the provider/capability boundary. Crash recovery MUST use `tool/dispatched`, not `tool/call`, to decide whether an external side effect may have occurred.
+## I-22: Ownership conflict terminates the live actor
 
-## I-22: Stable retry identity
+If a live Agent's conditional append observes a Session head conflict, that Agent
+instance MUST stop authoring the Session. It MUST NOT silently load and adopt the
+competing writer's events.
 
-A retry of one logical ToolCall uses a new `InvocationId` and an incremented attempt number, but MUST preserve its durable `IdempotencyKey` and `ProviderId` in v0.1. A `non-idempotent-write` Tool MUST NOT be automatically redispatched.
+## I-23: Actor owner is singular
 
-## I-23: Non-idempotent uncertainty is singular in v0.1
+The process-local mutable `AgentActor` owner MUST NOT be cloneable. Cloneable access
+is provided through message-passing handles only.
 
-The v0.1 scheduler MUST keep at most one unresolved `non-idempotent-write` dispatch per Agent. This preserves the single active RecoveryBlock model.
+## I-24: Wake is latched only after durable enqueue
 
-## I-24: Resume converges before new turn
-
-A process-local Agent MAY be Idle while its durable Session contains an unfinished turn/step. Core MUST resolve the resulting ResumeDecision before starting a new turn. `ExecutionGate == Open` alone is not sufficient permission to start a new turn.
+A `wakeup=true` command MUST NOT make work eligible for the driver before the
+corresponding `inbox/enqueued` event has committed successfully.

@@ -33,14 +33,18 @@ pub struct AgentState {
     pub gate: ExecutionGate,
     pub resume: ResumeDecision,
     pub projection: SessionProjection,
+
+    /// Process-local wake latch. It is reconstructed from durable pending Inbox
+    /// items on startup and becomes true only after a wakeup-bearing enqueue is
+    /// durably committed. Batch 05 does not yet consume this latch into a Turn;
+    /// the next driver batch will do so under the actor's single-owner task.
+    pub wake_requested: bool,
 }
 
 impl AgentState {
     pub fn from_bootstrap(instance_id: AgentInstanceId, bootstrap: AgentBootstrap) -> Self {
-        let gate = match &bootstrap.resume {
-            ResumeDecision::Blocked { block, .. } => ExecutionGate::Blocked(block.clone()),
-            _ => ExecutionGate::Open,
-        };
+        let wake_requested = projection_has_pending_wakeup(&bootstrap.projection);
+        let gate = gate_from_resume(&bootstrap.resume);
         let phase = AgentPhase::Idle {
             last_turn: bootstrap.projection.lifecycle.last_ended_turn,
         };
@@ -53,7 +57,20 @@ impl AgentState {
             gate,
             resume: bootstrap.resume,
             projection: bootstrap.projection,
+            wake_requested,
         }
+    }
+
+    pub(crate) fn replace_durable_view(
+        &mut self,
+        expected_seq: EventSeq,
+        projection: SessionProjection,
+        resume: ResumeDecision,
+    ) {
+        self.expected_seq = expected_seq;
+        self.gate = gate_from_resume(&resume);
+        self.resume = resume;
+        self.projection = projection;
     }
 
     /// New turn creation is permitted only after all interrupted durable work has
@@ -67,6 +84,22 @@ impl AgentState {
     pub const fn needs_resume_work(&self) -> bool {
         !self.resume.is_clean()
     }
+}
+
+fn gate_from_resume(resume: &ResumeDecision) -> ExecutionGate {
+    match resume {
+        ResumeDecision::Blocked { block, .. } => ExecutionGate::Blocked(block.clone()),
+        _ => ExecutionGate::Open,
+    }
+}
+
+fn projection_has_pending_wakeup(projection: &SessionProjection) -> bool {
+    projection
+        .inbox
+        .next_turn
+        .iter()
+        .chain(projection.inbox.next_step.iter())
+        .any(|item| item.wakeup)
 }
 
 #[cfg(test)]
@@ -86,6 +119,7 @@ mod tests {
 
     fn bootstrap(resume: ResumeDecision) -> AgentBootstrap {
         AgentBootstrap {
+            events: Vec::new(),
             head: SessionHead {
                 session_id: id("ses_1"),
                 seq: EventSeq::FIRST,
@@ -99,6 +133,7 @@ mod tests {
     fn clean_bootstrap_may_start_new_turn() {
         let state = AgentState::from_bootstrap(id("agt_1"), bootstrap(ResumeDecision::Clean));
         assert!(state.can_start_new_turn());
+        assert!(!state.wake_requested);
     }
 
     #[test]

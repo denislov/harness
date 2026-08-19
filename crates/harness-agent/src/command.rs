@@ -1,9 +1,6 @@
-use harness_types::{CancelCause, InboxTarget, Message};
+use harness_types::{CancelCause, EventId, EventSeq, InboxTarget, Message, MessageId};
 
 /// State-changing commands accepted by a live Agent actor.
-///
-/// Batch 04 freezes only the command vocabulary. Command transport, acknowledgement,
-/// and driver execution are intentionally deferred to the next batch.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum AgentCommand {
@@ -43,4 +40,24 @@ impl AgentCommand {
     pub const fn cancel(cause: CancelCause, keep_inbox: bool) -> Self {
         Self::Cancel { cause, keep_inbox }
     }
+}
+
+/// Durable acknowledgement for `AgentCommand::Send`.
+///
+/// Receipt delivery occurs only after `inbox/enqueued` has been committed and
+/// incorporated into the actor's local projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendReceipt {
+    pub message_id: MessageId,
+    pub event_id: EventId,
+    pub seq: EventSeq,
+    pub wake_requested: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentCommandAck {
+    Send(SendReceipt),
+    Cancelled,
+    Shutdown,
 }

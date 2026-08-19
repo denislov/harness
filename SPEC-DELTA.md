@@ -352,3 +352,87 @@ Events appended concurrently after that head are ignored by the bootstrap snapsh
 `SESSION_PROJECTION_VERSION_V1` remains `1` because no production Agent runtime has emitted the previous incomplete Tool dispatch semantics. This project is still within the draft v0.1 contract stabilization window.
 
 Once a released runtime persists v1 Sessions, future breaking interpretation changes must use an explicit projection/schema migration rather than silently modifying v1.
+
+# Specification Delta - Batch 05
+
+This file lists normative changes introduced after Batch 04.
+
+## D-01: Tokio reference runtime selection
+
+The Rust reference live Agent implementation uses Tokio for task execution and in-process
+mailbox primitives. This does not make Tokio part of the cross-language architecture or durable
+protocol. `harness-types` and `harness-session` remain executor-neutral.
+
+## D-02: Single owner / cloneable handle
+
+`AgentActor` is the singular mutable owner and must not be cloneable. Clients clone
+`AgentHandle`, which only contains message-passing capability.
+
+## D-03: Durable acknowledgement boundary
+
+For `Send`, acknowledgement occurs after:
+
+```text
+inbox/enqueued validated
+-> conditional SessionStore append committed
+-> Store commit result verified
+-> actor projection/resume view updated
+-> wake latch updated
+-> SendReceipt returned
+```
+
+Mailbox insertion by itself is not durable acceptance.
+
+## D-04: Bootstrap snapshot retention
+
+`AgentBootstrap` retains the exact `Vec<SessionEvent>` prefix used to derive its projection.
+The actor validates future batches against this local snapshot. It does not re-read after every
+write because a read could silently adopt events from a competing writer.
+
+A competing write is detected only through `expected_seq` and is treated as ownership loss.
+
+## D-05: Ownership loss is terminal
+
+A live actor that observes `SessionStore::Conflict` terminates after returning the command error.
+It does not rebase itself. A supervisor may explicitly create a fresh Agent instance later.
+
+## D-06: EventId uniqueness
+
+Committed EventIds must be unique within one Session. `V1SessionProjector` rejects duplicates,
+and the reference `MemorySessionStore` rejects a duplicate EventId before commit. This also lets
+the actor reject a broken EventId source before storage commit during local prevalidation.
+
+## D-07: Wake latch
+
+`wakeup=true` becomes `AgentState.wake_requested = true` only after durable enqueue. The latch is
+coalescing and is reconstructed from pending Inbox items whose durable enqueue carried
+`wakeup=true`.
+
+Batch 05 does not consume the latch; Batch 06 will connect it to the Turn/Step driver.
+
+## D-08: Startup recovery convergence
+
+Before publishing `AgentHandle`, Batch 05 automatically performs recovery steps that do not call
+external capabilities.
+
+### Interrupted model request
+
+Append `model/failed(MODEL_REQUEST_FAILED)` and re-project. This removes the ambiguous pending model
+attempt while leaving the open step for the future driver.
+
+### Unknown non-idempotent Tool outcome
+
+Atomically append:
+
+```text
+recovery/blocked
+step/ended(blocked)
+turn/ended(blocked)
+```
+
+The live actor is then exposed with a blocked ExecutionGate and quiescent durable lifecycle.
+
+## D-09: Cancel remains deferred
+
+`AgentCommand::Cancel` remains in the command vocabulary but returns an explicit unsupported
+operation until the driver owns cancellation tokens and durable convergence semantics.

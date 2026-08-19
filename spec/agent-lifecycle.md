@@ -44,13 +44,13 @@ Conceptual structure:
 
 ```rust
 pub enum AgentPhase {
-    Idle { last_turn: Option<TurnNo> },
-    Running { turn: TurnNo, step: Option<StepNo> },
+    Idle { last_turn: TurnNo },
+    Running { turn: TurnNo, step: StepNo },
     Maintenance,
 }
 ```
 
-The phase model deliberately does not include `WaitingForLlm`, `WaitingForTool`, or `WaitingForApproval`. Those are operations within a Running activity, not additional persistent state-machine phases. `step=None` represents the process-local driver being inside a turn but between step boundaries; `last_turn=None` is valid for a newly created Session.
+The phase model deliberately does not include `WaitingForLlm`, `WaitingForTool`, or `WaitingForApproval`. Those are operations within a Running activity, not additional persistent state-machine phases.
 
 ## 4. ExecutionGate
 
@@ -230,29 +230,104 @@ Rules:
 
 ## 11. Resume
 
-On resume, Core loads a point-in-time durable Session snapshot and reconstructs:
+On resume, Core loads durable session state, reconstructs:
 
 - current Inbox projection;
-- durable lifecycle cursor (quiescent/open turn/open step);
-- pending model request, if any;
-- pending logical ToolCalls and their latest durable `tool/dispatched` marker, if any;
+- last completed turn/step boundary;
 - unresolved recovery gate;
 - model history projection.
 
-A RecoveryAnalyzer classifies the snapshot before a new turn may start. v0.1 decisions are conceptually:
+Normal execution starts only if the recovered structural invariants are valid and ExecutionGate is Open.
+
+## 12. Batch 05 live actor transport
+
+The v0.1 Rust reference actor uses a bounded Tokio `mpsc` mailbox. `AgentHandle`
+is cloneable; `AgentActor` is not. The mailbox receiver and all mutable Agent state
+remain owned by exactly one Tokio task.
+
+A submitted state-changing command carries a Tokio `oneshot` acknowledgement
+channel. Mailbox delivery alone is not durable acceptance. For `Send`, the actor
+MUST complete the following order:
 
 ```text
-clean
-continue-open-turn
-continue-open-step
-recover-interrupted-model-request
-recover-tool-batch
-persist-recovery-block
-blocked
+receive command
+    -> construct inbox/enqueued draft
+    -> validate proposed durable history locally
+    -> SessionStore.append(expected_seq)
+    -> verify committed result
+    -> update local projection / resume view
+    -> update wake latch
+    -> send acknowledgement
 ```
 
-`tool/call` without `tool/dispatched` is a pre-dispatch interruption and may restart the Tool pipeline. A durable dispatch without a terminal result is interpreted using SideEffectClass. `non-idempotent-write` requires a durable recovery block; `read-only` is retryable; `idempotent-write` is retryable only after the provider's idempotency guarantee is verified.
+If the caller receives `SendReceipt`, the corresponding `inbox/enqueued` event is
+already committed.
 
-`AgentPhase` is process-local driver ownership. After process restart the new Agent instance starts `Idle` even if the durable Session contains an unfinished turn/step; the unfinished durable lifecycle is represented by the ResumeDecision and MUST converge before a new turn begins.
+Dropping the acknowledgement receiver after mailbox submission does not cancel the
+actor's durable mutation. Caller cancellation before the mailbox accepts the command
+means no acceptance guarantee exists.
 
-Normal new-turn execution starts only if the recovered structural invariants are valid, ExecutionGate is Open, and ResumeDecision is `clean`.
+## 13. Wake latch
+
+`wakeup=true` sets a process-local `wake_requested` latch only after the enqueue is
+durable. Multiple wake requests may coalesce into one latch because wake is a request
+to run the single driver, not a durable count of driver executions.
+
+On process restart the latch is reconstructed as true when any pending Inbox item was
+durably enqueued with `wakeup=true`.
+
+Batch 05 does not yet consume the latch into a new Turn. Driver consumption is part of
+the next Turn/Step implementation batch.
+
+## 14. Startup convergence before handle publication
+
+Before a new `AgentHandle` is returned, the Rust reference actor performs recovery
+steps that require no external capability call.
+
+### 14.1 Interrupted model attempt
+
+If projection yields `RecoverInterruptedModelRequest`, Core appends a durable
+`model/failed` with `MODEL_REQUEST_FAILED`, stating that the process restarted before
+a terminal model response became durable. This converts the state to ordinary open-step
+continuation.
+
+### 14.2 Unknown non-idempotent Tool outcome
+
+If projection yields `PersistRecoveryBlock`, Core atomically appends:
+
+```text
+recovery/blocked
+step/ended(blocked)
+turn/ended(blocked)
+```
+
+The resulting Agent is exposed as `Idle + ExecutionGate::Blocked` with no open durable
+turn/step. Resolution still requires a late authoritative `tool/result` followed by
+`recovery/resolved` as defined by the recovery rules.
+
+### 14.3 Deferred startup work
+
+The following remain driver/capability work and are not automatically converged by
+Batch 05:
+
+- ordinary `ContinueOpenTurn`;
+- ordinary `ContinueOpenStep`;
+- `RecoverToolBatch` retries;
+- an already durable `Blocked` recovery gate.
+
+## 15. Live ownership conflict
+
+A `SessionStore::Conflict` observed by a live Agent append means the actor no longer
+has exclusive single-writer ownership of the Session snapshot it bootstrapped from.
+The actor MUST return an ownership-lost error for the command and terminate rather
+than adopting the competing writer's events into its local state.
+
+A future supervisor may choose to bootstrap a fresh Agent instance explicitly. The
+existing actor must not silently rebase itself.
+
+## 16. Batch 05 cancellation boundary
+
+The `Cancel` command remains part of the stable command vocabulary, but Batch 05 does
+not implement active-driver cancellation or durable Inbox discard convergence. The
+reference actor returns an explicit unsupported-operation error for `Cancel` until the
+Turn/Step driver introduces cancellation tokens and activity convergence.

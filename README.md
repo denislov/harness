@@ -249,3 +249,104 @@ Batch 05 should introduce:
 - durable `Send` implementation (`inbox/enqueued` before acknowledgement);
 - driver wake ownership;
 - resume-plan convergence before normal turn execution.
+
+# Harness API Batch 05
+
+Batch 05 turns the Batch 04 Agent recovery skeleton into the first live Tokio actor runtime.
+It still does **not** implement the Turn/Step/LLM/Tool driver.
+
+## Scope
+
+Changed files:
+
+```text
+Cargo.workspace-snippet.toml
+crates/harness-agent/
+  Cargo.toml
+  src/
+    actor.rs
+    bootstrap.rs
+    command.rs
+    error.rs
+    event_source.rs
+    handle.rs
+    lib.rs
+    recovery.rs        # unchanged from Batch 04, included for drop-in replacement
+    runtime.rs
+    state.rs
+crates/harness-session/src/projector.rs
+crates/harness-storage-local/src/memory_session.rs
+spec/
+  agent-lifecycle.md
+  invariants.md
+  rust-core-layout.md
+```
+
+`harness-session/projector.rs` and the reference `MemorySessionStore` both enforce the
+new EventId uniqueness invariant: duplicate `SessionEvent.eventId` values within one Session
+are rejected before a new append becomes visible.
+
+## Apply
+
+1. Merge the Tokio workspace dependency:
+
+```toml
+[workspace.dependencies]
+tokio = { version = "1", features = ["sync", "rt"] }
+```
+
+2. Replace the included `harness-agent` crate files.
+3. Replace `crates/harness-session/src/projector.rs`.
+4. Replace `crates/harness-storage-local/src/memory_session.rs`.
+5. Replace the three included Spec files.
+
+## Verify
+
+```bash
+cargo fmt --all
+
+cargo check \
+  -p harness-session \
+  -p harness-storage-local \
+  -p harness-agent
+
+cargo test \
+  -p harness-session \
+  -p harness-storage-local \
+  -p harness-agent
+
+cargo check --workspace
+cargo test --workspace
+```
+
+## What Batch 05 freezes
+
+- Tokio is the Rust reference execution runtime for the live Agent actor layer.
+- `AgentActor` is the singular mutable owner and is no longer cloneable.
+- `AgentHandle` is cloneable and communicates through a bounded Tokio `mpsc` mailbox.
+- each state-changing command receives a Tokio `oneshot` acknowledgement;
+- `SendReceipt` is emitted only after durable `inbox/enqueued` commit and local projection update;
+- `wakeup=true` sets a coalescing process-local wake latch only after durable commit;
+- the wake latch is reconstructed from pending durable Inbox items on startup;
+- `SessionStore::Conflict` is terminal for the current live Agent instance;
+- the actor validates the proposed projected history before appending it;
+- after append, the actor verifies that the Store returned exactly the prevalidated committed batch;
+- bootstrap now retains the exact event prefix used to derive the projection;
+- startup automatically durably fails interrupted model requests;
+- startup automatically persists an unknown non-idempotent Tool recovery gate and closes its step/turn as blocked;
+- duplicate EventIds in one Session are invalid.
+
+## Deliberately deferred
+
+- consuming `wake_requested` into a real driver run;
+- turn creation and Inbox claiming;
+- step creation and user/message entry;
+- LLM request execution;
+- Tool execution/retry;
+- cancellation tokens and `Cancel` convergence;
+- production EventId generation policy;
+- Agent Registry / application composition in `harness-runtime`.
+
+`AgentEventSource` is intentionally injected. Batch 05 tests use deterministic sources;
+production UUID/ULID policy should be supplied later by `harness-runtime` rather than hard-coded
+into the Agent domain crate.

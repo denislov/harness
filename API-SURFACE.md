@@ -488,3 +488,163 @@ AgentActor::from_bootstrap(instance_id, bootstrap)
 actor.state()
 actor.into_state()
 ```
+
+# Batch 05 Public API Surface
+
+## `harness-agent`
+
+### Actor runtime
+
+```rust
+pub struct AgentActor { /* single owner */ }
+
+pub enum AgentExitReason {
+    ShutdownRequested,
+    MailboxClosed,
+    Fatal(AgentError),
+}
+
+pub struct AgentExit {
+    pub reason: AgentExitReason,
+    pub final_state: AgentState,
+}
+```
+
+`AgentActor` deliberately does not implement `Clone`.
+
+### Handle
+
+```rust
+#[derive(Clone)]
+pub struct AgentHandle { /* mailbox sender */ }
+
+impl AgentHandle {
+    pub fn instance_id(&self) -> &AgentInstanceId;
+    pub fn session_id(&self) -> &SessionId;
+
+    pub async fn submit(&self, command: AgentCommand)
+        -> Result<AgentCommandAck, AgentHandleError>;
+
+    pub async fn send(&self, message: Message, target: InboxTarget, wakeup: bool)
+        -> Result<SendReceipt, AgentHandleError>;
+
+    pub async fn followup(&self, message: Message)
+        -> Result<SendReceipt, AgentHandleError>;
+
+    pub async fn steer(&self, message: Message)
+        -> Result<SendReceipt, AgentHandleError>;
+
+    pub async fn inject(&self, message: Message)
+        -> Result<SendReceipt, AgentHandleError>;
+
+    pub async fn cancel(&self, cause: CancelCause, keep_inbox: bool)
+        -> Result<(), AgentHandleError>;
+
+    pub async fn snapshot(&self) -> Result<AgentState, AgentHandleError>;
+    pub async fn shutdown(&self) -> Result<(), AgentHandleError>;
+}
+```
+
+`cancel` is present but returns `UnsupportedOperation` in Batch 05.
+
+### Durable send acknowledgement
+
+```rust
+pub struct SendReceipt {
+    pub message_id: MessageId,
+    pub event_id: EventId,
+    pub seq: EventSeq,
+    pub wake_requested: bool,
+}
+
+pub enum AgentCommandAck {
+    Send(SendReceipt),
+    Cancelled,
+    Shutdown,
+}
+```
+
+### Event source
+
+```rust
+pub trait AgentEventSource: Send + Sync {
+    fn next_event_id(&self) -> EventId;
+    fn now(&self) -> Timestamp;
+}
+```
+
+The production implementation must generate collision-resistant IDs across restarts.
+
+### Spawn / task supervision
+
+```rust
+pub struct AgentActorConfig {
+    pub mailbox_capacity: usize,
+    pub bootstrap_page_size: usize,
+}
+
+pub async fn spawn_agent(
+    instance_id: AgentInstanceId,
+    session_id: SessionId,
+    store: Arc<dyn SessionStore>,
+    event_source: Arc<dyn AgentEventSource>,
+    config: AgentActorConfig,
+) -> Result<SpawnedAgent, AgentSpawnError>;
+
+pub struct SpawnedAgent {
+    pub handle: AgentHandle,
+    pub task: AgentTask,
+}
+
+impl AgentTask {
+    pub async fn join(self) -> Result<AgentExit, AgentJoinError>;
+    pub fn abort(&self);
+    pub fn is_finished(&self) -> bool;
+}
+```
+
+### Errors
+
+```rust
+pub enum AgentError {
+    OwnershipLost { session_id, expected, actual },
+    Storage { code, message },
+    InvalidDurableMutation { message },
+    StorageContractViolation { message },
+    UnsupportedOperation { operation, reason },
+}
+
+pub enum AgentHandleError {
+    ActorClosed,
+    AcknowledgementDropped,
+    AcknowledgementMismatch,
+    Command(AgentError),
+}
+```
+
+### State addition
+
+```rust
+pub struct AgentState {
+    // existing Batch 04 fields ...
+    pub wake_requested: bool,
+}
+```
+
+### Bootstrap addition
+
+```rust
+pub struct AgentBootstrap {
+    pub events: Vec<SessionEvent>,
+    pub head: SessionHead,
+    pub projection: SessionProjection,
+    pub resume: ResumeDecision,
+}
+```
+
+The retained event prefix is the exact snapshot used by the actor for local pre-commit projection.
+
+## `harness-session`
+
+No public type is added. `V1SessionProjector` now enforces uniqueness of `SessionEvent.eventId`
+within one Session.

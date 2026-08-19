@@ -1,5 +1,5 @@
 use harness_session::{
-    ProjectionError, SessionHead, SessionProjection, SessionProjector, SessionStore,
+    ProjectionError, SessionEvent, SessionHead, SessionProjection, SessionProjector, SessionStore,
     SessionStoreError,
 };
 use harness_types::{EventSeq, SessionId};
@@ -9,6 +9,12 @@ use crate::{RecoveryAnalysisError, RecoveryAnalyzer, ResumeDecision};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentBootstrap {
+    /// Exact committed event prefix used to derive `projection` and `resume`.
+    ///
+    /// Keeping this snapshot in the bootstrap result lets the live actor validate
+    /// and project future append batches locally, without re-reading past a known
+    /// ownership boundary and accidentally adopting writes from a competing writer.
+    pub events: Vec<SessionEvent>,
     pub head: SessionHead,
     pub projection: SessionProjection,
     pub resume: ResumeDecision,
@@ -142,6 +148,7 @@ where
         let projection = self.projector.project(&events)?;
         let resume = RecoveryAnalyzer.analyze(&projection)?;
         Ok(AgentBootstrap {
+            events,
             head,
             projection,
             resume,

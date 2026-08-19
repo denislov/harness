@@ -9,3 +9,8 @@ license.workspace = true
 harness-session = { path = "../harness-session" }
 harness-types = { path = "../harness-types" }
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+harness-storage-local = { path = "../harness-storage-local" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

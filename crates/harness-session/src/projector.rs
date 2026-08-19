@@ -809,7 +809,14 @@ fn validate_stream_envelope(events: &[SessionEvent]) -> Result<(), ProjectionErr
 
     let session_id = first.session_id().clone();
     let mut expected = EventSeq::FIRST;
+    let mut seen_event_ids = BTreeSet::new();
     for (index, event) in events.iter().enumerate() {
+        if !seen_event_ids.insert(event.event_id().clone()) {
+            return Err(ProjectionError::InvalidSequence(format!(
+                "event id {} appears more than once in the same Session",
+                event.event_id()
+            )));
+        }
         if event.session_id() != &session_id {
             return Err(ProjectionError::InvalidSequence(format!(
                 "event {} belongs to session {}, expected {}",
@@ -1516,5 +1523,36 @@ mod tests {
         assert!(resolved.pending_tool_calls.is_empty());
         assert!(resolved.pending_tool_dispatches.is_empty());
         assert_eq!(resolved.model_messages.len(), 3);
+    }
+
+    #[test]
+    fn rejects_duplicate_event_ids_within_one_session() {
+        let session_id: SessionId = id("ses_duplicate_event_id");
+        let first = commit(
+            &session_id,
+            1,
+            SessionEventPayload::SessionCreated(SessionCreated::default()),
+            None,
+        );
+        let duplicate_id = first.event_id().clone();
+        let second = SessionEvent::committed(
+            session_id,
+            seq(2),
+            NewSessionEvent::new(
+                duplicate_id,
+                ts(),
+                SessionEventPayload::InboxEnqueued(InboxEnqueued {
+                    message: user_message("msg_dup_event", "hello"),
+                    target: InboxTarget::NextTurn,
+                    wakeup: true,
+                }),
+            ),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            V1SessionProjector.project(&[first, second]),
+            Err(ProjectionError::InvalidSequence(_))
+        ));
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
@@ -8,7 +8,7 @@ use harness_session::{
     AppendResult, CreateSession, ForkSession, NewSessionEvent, SessionEvent, SessionEventPayload,
     SessionHead, SessionStore, SessionStoreError,
 };
-use harness_types::{EventSeq, SessionId};
+use harness_types::{EventId, EventSeq, SessionId};
 
 /// In-memory reference implementation of [`SessionStore`].
 ///
@@ -80,12 +80,20 @@ impl SessionStore for MemorySessionStore {
         // caller has demonstrated that it is appending to the current head do
         // we validate the proposed batch. A stale writer therefore observes
         // CONFLICT even if its proposed events are themselves invalid.
+        let mut event_ids: HashSet<EventId> =
+            log.iter().map(|event| event.event_id().clone()).collect();
         for (index, event) in events.iter().enumerate() {
             event.validate().map_err(|error| {
                 SessionStoreError::InvalidArgument(format!(
                     "invalid event at append batch index {index}: {error}"
                 ))
             })?;
+            if !event_ids.insert(event.event_id().clone()) {
+                return Err(SessionStoreError::InvalidArgument(format!(
+                    "duplicate event id {} at append batch index {index}",
+                    event.event_id()
+                )));
+            }
         }
 
         // Build the complete committed batch before mutating the log. If event
@@ -240,7 +248,14 @@ fn validate_log(session_id: &SessionId, log: &[SessionEvent]) -> Result<(), Sess
     }
 
     let mut expected = EventSeq::FIRST;
+    let mut event_ids = HashSet::new();
     for event in log {
+        if !event_ids.insert(event.event_id().clone()) {
+            return Err(SessionStoreError::Corrupt {
+                session_id: session_id.clone(),
+                reason: format!("duplicate event id {}", event.event_id()),
+            });
+        }
         if event.session_id() != session_id {
             return Err(SessionStoreError::Corrupt {
                 session_id: session_id.clone(),
@@ -729,6 +744,40 @@ mod tests {
                 duplicate_target,
                 SessionStoreError::AlreadyExists { .. }
             ));
+        });
+    }
+
+    #[test]
+    fn duplicate_event_id_is_rejected_before_commit() {
+        block_on(async {
+            let store = MemorySessionStore::new();
+            let id = session_id("ses_duplicate_event_id");
+            store
+                .create(create_request("ses_duplicate_event_id"))
+                .await
+                .unwrap();
+
+            let duplicate = NewSessionEvent::new(
+                event_id("evt_create_ses_duplicate_event_id"),
+                timestamp(),
+                SessionEventPayload::InboxEnqueued(harness_session::InboxEnqueued {
+                    message: harness_types::Message {
+                        id: harness_types::MessageId::new("msg_dup").unwrap(),
+                        role: harness_types::Role::User,
+                        source: harness_types::MessageSource::user(),
+                        content: vec![harness_types::ContentBlock::text("hello")],
+                    },
+                    target: harness_types::InboxTarget::NextTurn,
+                    wakeup: true,
+                }),
+            );
+
+            let error = store
+                .append(&id, EventSeq::FIRST, vec![duplicate])
+                .await
+                .unwrap_err();
+            assert!(matches!(error, SessionStoreError::InvalidArgument(_)));
+            assert_eq!(store.head(&id).await.unwrap().seq, EventSeq::FIRST);
         });
     }
 

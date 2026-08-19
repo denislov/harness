@@ -122,22 +122,26 @@ Suggested files:
 
 ```text
 command.rs
-recovery.rs
-bootstrap.rs
-inbox.rs
+error.rs
+event_source.rs
+handle.rs
 state.rs
-loop_driver.rs
+bootstrap.rs
+recovery.rs
 actor.rs
+runtime.rs
+loop_driver.rs
 lib.rs
 ```
 
 Responsibilities:
 
-- Agent actor;
-- AgentCommand;
-- Session bootstrap and RecoveryAnalyzer;
-- ResumeDecision and durable recovery classification;
-- Inbox projection and delivery behavior;
+- single-owner Agent actor;
+- cloneable AgentHandle and bounded command mailbox;
+- AgentCommand plus durable acknowledgements;
+- injected AgentEventSource for durable event identity/time;
+- bootstrap and startup recovery convergence;
+- Inbox projection and wake-latch behavior;
 - AgentPhase and ExecutionGate;
 - turn/step driver;
 - cancellation convergence.
@@ -258,6 +262,12 @@ Async/process concerns belong primarily in:
 - concrete storage implementations.
 
 This keeps protocol and durable-domain types portable and testable.
+
+The Rust reference implementation selects Tokio for the live `harness-agent` execution
+layer beginning in Batch 05. Tokio types are not introduced into `harness-types` or
+`harness-session`. The production policy for globally unique EventId generation remains
+a `harness-runtime` composition concern and is injected into `harness-agent` through
+`AgentEventSource`.
 
 ## 13. First implementation vertical slice
 
