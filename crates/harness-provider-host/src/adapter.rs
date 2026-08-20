@@ -391,7 +391,7 @@ fn map_llm_stream_item(item: LlmStreamItem) -> Result<SequencedStreamEvent, Port
         }
         WireLlmStreamEvent::Finish { reason, failure } => {
             let failure = failure
-                .map(|failure| transcode::<_, PortableError>(failure))
+                .map(transcode::<_, PortableError>)
                 .transpose()
                 .map_err(|error| {
                     protocol_mapping_error("failed to decode provider failure", error)

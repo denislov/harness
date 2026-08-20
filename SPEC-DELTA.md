@@ -978,3 +978,7 @@ LLM/Tool timeout tasks issue best-effort `CancelCause::Timeout` through the doma
 ## D-11.7 — Python subprocess is the first polyglot acceptance target
 
 `agent-model` on the reference Python provider deterministically emits an `echo` ToolCall on the first model step and a final text response after ToolResult is present. The Rust integration test must exercise the complete Agent lifecycle through this subprocess.
+
+## Batch 12 — Python Provider SDK v0.1
+
+Provider SDKs are formally defined as optional authoring layers above Provider Protocol v1. The Python reference SDK owns stdio JSON-RPC/NDJSON plumbing, generated capability manifests, Tool/LLM operation dispatch, LLM stream sequencing and best-effort cancellation. The wire protocol remains unchanged at version `1.0`; Core remains authoritative for durable cancellation and unknown-outcome recovery semantics.

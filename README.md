@@ -1104,3 +1104,7 @@ It uses `python3` by default. Set `PYTHON=/path/to/python` to override the execu
 ## Important semantic point
 
 Provider cancellation remains advisory. Agent durable cancellation and Tool unknown-outcome semantics remain authoritative. A successful `capability.cancel` notification is never treated as proof that an external side effect did not occur.
+
+## Batch 12 — Python Provider SDK v0.1
+
+Batch 12 adds `sdk/python/harness_provider_sdk`, the first author-facing SDK above Provider Protocol v1. The SDK owns JSON-RPC/NDJSON framing, manifest generation, Tool/LLM dispatch, LLM sequence assignment, operation tracking, cancellation and shutdown. `providers/example-python/provider.py` now uses the SDK while keeping the same `echo`, `echo-model`, and `agent-model` capabilities, so the existing Rust Python vertical-slice test now traverses the SDK layer as well. Provider Protocol remains `1.0`.

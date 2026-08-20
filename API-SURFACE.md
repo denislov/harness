@@ -1626,3 +1626,11 @@ pub enum ProviderAdapterError {
 `AgentActor::handle_cancel` receives both LLM and Tool runtimes, captures the live capability cancellation target before durable mutation, commits Batch 09 cancellation/recovery events, then invokes the corresponding domain cancellation hook before aborting the local task.
 
 Agent-owned timeout paths invoke the same hooks with `CancelCause::Timeout`.
+
+## Batch 12 — Python Provider SDK
+
+New source package: `sdk/python/harness_provider_sdk`.
+
+Primary authoring surface: `ProviderApp`, `SideEffect`, `ToolResult`, `ToolContext`, `ModelContext`, `LlmStreamWriter`, `CancellationToken`, `CancelCause`, `last_text`, and `trailing_tool_result_text`.
+
+The SDK generates ProviderManifest from decorators and owns Provider Protocol v1 lifecycle/dispatch framing. Rust public APIs are unchanged except for the implementation-only Clippy cleanup in `harness-provider-host/src/adapter.rs`.
