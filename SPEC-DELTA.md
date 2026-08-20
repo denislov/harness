@@ -1031,3 +1031,16 @@ See `spec/batch-14-runtime-composition.md` for the complete contract.
 - Add Runtime restart acceptance: previous Session projection and model-request BlobRefs survive store/Runtime reopen and a subsequent Turn executes normally.
 - Fix Batch 14 `result_large_err` by boxing build-error sources and `too_many_arguments` by introducing crate-private `HarnessRuntimeParts`; no lint suppression is added.
 - Provider Protocol, SessionEvent schema, Agent state machine, Tool recovery semantics, and Python SDK conformance remain unchanged.
+# Batch 16 Spec Delta
+
+1. `harness.toml` MUST declare `schema_version = 1`; unsupported versions are rejected.
+2. `harness.toml` is application composition input, not durable Agent state. Changing it does not rewrite prior SessionEvent history.
+3. Relative `runtime.data_dir`, provider `cwd`, and path-like provider programs are resolved relative to the canonical configuration-file directory. A provider with no explicit `cwd` runs with the config directory as its working directory.
+4. Provider subprocesses retain the existing `ProviderHost` parent-environment inheritance semantics; configured `env` entries add or override values. Secret isolation/injection is not modeled in Batch 16; `CredentialResolver` remains Batch 17 work.
+5. `config check` MUST NOT start Provider processes. It validates only file syntax and static composition references/limits. Runtime build remains authoritative for Provider manifest identity and capability compatibility.
+6. Batch 16 file configuration supports only an explicitly selected `allow-all` ToolPolicy. Approval interactions are not silently auto-resolved by the CLI.
+7. Configured Tool schemas are model-visible metadata. Batch 16 does not select a JSON Schema execution engine; CLI-composed Tools use a Core-side JSON-object argument validator.
+8. `harness run` is a foreground process. It owns one live Runtime and one live Agent for the selected Session, waits for each submitted turn to converge, prints model text, and performs Agent-before-Provider shutdown on exit.
+9. `harness session create` and `harness inspect` operate directly on the configured durable local SessionStore and do not require Provider startup.
+10. CLI-generated opaque identifiers use UUID v4 values with the existing recommended Harness prefixes.
+11. Daemon/server operation, remote control, full credentials, RuntimeEvent observability, and dynamic Provider membership remain outside Batch 16.

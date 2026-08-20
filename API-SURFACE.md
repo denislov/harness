@@ -1755,3 +1755,50 @@ impl HarnessRuntimeBuilder {
 `HarnessRuntimeBuildError` keeps the same semantic variants but source-heavy build failures now store boxed sources. It also gains `DurableLocalStorage` for the convenience composition path.
 
 `HarnessRuntime::from_parts` remains crate-private and now receives one crate-private `HarnessRuntimeParts` value.
+# Batch 16 Public API Surface
+
+## `harness-config`
+
+```text
+HARNESS_CONFIG_SCHEMA_VERSION = 1
+HarnessConfig
+RuntimeConfig
+ProviderConfig
+ProfileConfig
+ModelConfig
+ToolConfig
+PolicyConfig::AllowAll
+LoadedHarnessConfig
+RuntimePlan
+HarnessConfigError
+```
+
+Key entry points:
+
+```rust
+let loaded = LoadedHarnessConfig::load("harness.toml")?;
+let plan = loaded.compile()?;
+let builder = plan.runtime_builder(event_source, id_source)?;
+let runtime = builder.build().await?;
+```
+
+`RuntimePlan` exposes resolved runtime info, durable data directory, provider/profile counts, profile names, and the optional default profile.
+
+## `harness-cli`
+
+Binary name:
+
+```text
+harness
+```
+
+Commands:
+
+```text
+harness --config <FILE> config check
+harness --config <FILE> session create
+harness --config <FILE> run <SESSION_ID> [--profile <NAME>]
+harness --config <FILE> inspect <SESSION_ID> [--pretty]
+```
+
+Batch 16 CLI identity generation uses UUID v4 while preserving existing opaque prefixes (`ses_`, `agt_`, `evt_`, `msg_`).

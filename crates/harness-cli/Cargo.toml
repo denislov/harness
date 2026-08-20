@@ -1,0 +1,25 @@
+[package]
+name = "harness-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+harness-agent = { path = "../harness-agent" }
+harness-config = { path = "../harness-config" }
+harness-runtime = { path = "../harness-runtime" }
+harness-session = { path = "../harness-session" }
+harness-storage-local = { path = "../harness-storage-local" }
+harness-types = { path = "../harness-types" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid.workspace = true
+

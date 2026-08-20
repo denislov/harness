@@ -1,0 +1,34 @@
+schema_version = 1
+
+[runtime]
+name = "harness-cli"
+data_dir = ".harness"
+default_profile = "default"
+
+[[providers]]
+id = "example-python"
+program = "python3"
+args = ["providers/example-python/provider.py"]
+request_timeout_ms = 5000
+shutdown_timeout_ms = 2000
+
+[profiles.default]
+policy = "allow-all"
+max_automatic_tool_attempts = 2
+
+[profiles.default.model]
+provider = "example-python"
+model = "agent-model"
+system = "Use the echo tool, then answer with its result."
+timeout_ms = 5000
+max_output_tokens = 256
+
+[[profiles.default.tools]]
+name = "echo"
+provider = "example-python"
+version = "1"
+description = "Echo a JSON object through the Python provider"
+parallel_safe = true
+side_effect = "read-only"
+timeout_ms = 5000
+input_schema = { type = "object", properties = { text = { type = "string" } }, required = ["text"], additionalProperties = false }
