@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod error;
 mod identity;
+mod observability;
 
 use clap::Parser as _;
 

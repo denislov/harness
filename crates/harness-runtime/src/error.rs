@@ -6,7 +6,7 @@ use harness_tools::ToolRegistryError;
 use harness_types::{ProviderId, SessionId};
 use thiserror::Error;
 
-use crate::HarnessRuntimeState;
+use crate::{CredentialKey, CredentialResolveError, HarnessRuntimeState};
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -29,6 +29,14 @@ pub enum HarnessRuntimeBuildError {
     #[error("provider {0} is configured more than once")]
     DuplicateProvider(ProviderId),
 
+    #[error(
+        "provider {provider} configures environment key {environment:?} as both plain env and credential env"
+    )]
+    ProviderEnvironmentConflict {
+        provider: ProviderId,
+        environment: String,
+    },
+
     #[error("Agent profile name must not be empty")]
     EmptyProfileName,
 
@@ -39,6 +47,17 @@ pub enum HarnessRuntimeBuildError {
     DurableLocalStorage {
         #[source]
         source: Box<DurableLocalStorageError>,
+    },
+
+    #[error(
+        "provider {provider} could not resolve credential {credential} for environment key {environment:?}: {source}"
+    )]
+    ProviderCredential {
+        provider: ProviderId,
+        environment: String,
+        credential: CredentialKey,
+        #[source]
+        source: Box<CredentialResolveError>,
     },
 
     #[error("failed to start configured provider {expected}: {source}")]

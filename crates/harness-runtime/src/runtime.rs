@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     AgentRegistry, HarnessRuntimeBuilder, HarnessRuntimeError, HarnessRuntimeInfo, LlmRegistry,
-    ProfileRegistry, ProviderRegistry, RuntimeIdSource,
+    ProfileRegistry, ProviderRegistry, RuntimeEventBus, RuntimeEventKind, RuntimeIdSource,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +37,7 @@ pub struct HarnessRuntime {
     blob_store: Arc<dyn BlobStore>,
     event_source: Arc<dyn AgentEventSource>,
     id_source: Arc<dyn RuntimeIdSource>,
+    events: RuntimeEventBus,
 }
 
 pub(crate) struct HarnessRuntimeParts {
@@ -48,6 +49,7 @@ pub(crate) struct HarnessRuntimeParts {
     pub blob_store: Arc<dyn BlobStore>,
     pub event_source: Arc<dyn AgentEventSource>,
     pub id_source: Arc<dyn RuntimeIdSource>,
+    pub events: RuntimeEventBus,
 }
 
 impl HarnessRuntime {
@@ -68,6 +70,7 @@ impl HarnessRuntime {
             blob_store: parts.blob_store,
             event_source: parts.event_source,
             id_source: parts.id_source,
+            events: parts.events,
         }
     }
 
@@ -101,6 +104,10 @@ impl HarnessRuntime {
 
     pub fn blob_store(&self) -> &Arc<dyn BlobStore> {
         &self.blob_store
+    }
+
+    pub fn events(&self) -> &RuntimeEventBus {
+        &self.events
     }
 
     pub async fn create_session(&self) -> Result<SessionId, HarnessRuntimeError> {
@@ -154,8 +161,13 @@ impl HarnessRuntime {
         self.agents.reserve_open(&session_id).await?;
 
         let instance_id = self.id_source.next_agent_instance_id();
+        self.events.publish(RuntimeEventKind::AgentOpening {
+            session_id: session_id.clone(),
+            profile: profile_name.to_owned(),
+            instance_id: instance_id.clone(),
+        });
         let spawned = match spawn_agent_with_capabilities(
-            instance_id,
+            instance_id.clone(),
             session_id.clone(),
             self.session_store.clone(),
             self.event_source.clone(),
@@ -168,14 +180,25 @@ impl HarnessRuntime {
             Ok(spawned) => spawned,
             Err(source) => {
                 self.agents.rollback_open(&session_id).await;
+                self.events.publish(RuntimeEventKind::AgentOpenFailed {
+                    session_id: session_id.clone(),
+                    profile: profile_name.to_owned(),
+                    instance_id,
+                });
                 return Err(HarnessRuntimeError::AgentSpawn { session_id, source });
             }
         };
 
-        Ok(self
+        let handle = self
             .agents
             .commit_open(&session_id, profile_name.to_owned(), spawned)
-            .await)
+            .await;
+        self.events.publish(RuntimeEventKind::AgentOpened {
+            session_id,
+            profile: profile_name.to_owned(),
+            instance_id,
+        });
+        Ok(handle)
     }
 
     pub async fn agent_handle(&self, session_id: &SessionId) -> Option<AgentHandle> {
@@ -188,8 +211,15 @@ impl HarnessRuntime {
         ensure_running(*state)?;
 
         let (handle, task) = self.agents.take_for_close(session_id).await?;
-        let failures = stop_agent(session_id, handle, task).await;
+        self.events.publish(RuntimeEventKind::AgentClosing {
+            session_id: session_id.clone(),
+        });
+        let failures = stop_agent(handle, task).await;
         self.agents.finish_close(session_id).await;
+        self.events.publish(RuntimeEventKind::AgentClosed {
+            session_id: session_id.clone(),
+            failed: !failures.is_empty(),
+        });
         if failures.is_empty() {
             Ok(())
         } else {
@@ -211,16 +241,28 @@ impl HarnessRuntime {
             }
             *state = HarnessRuntimeState::ShuttingDown;
         }
+        self.events.publish(RuntimeEventKind::RuntimeStopping);
 
         let mut failures = Vec::new();
         for (session_id, handle, task) in self.agents.drain_live().await {
-            for failure in stop_agent(&session_id, handle, task).await {
+            self.events.publish(RuntimeEventKind::AgentClosing {
+                session_id: session_id.clone(),
+            });
+            let agent_failures = stop_agent(handle, task).await;
+            self.events.publish(RuntimeEventKind::AgentClosed {
+                session_id: session_id.clone(),
+                failed: !agent_failures.is_empty(),
+            });
+            for failure in agent_failures {
                 failures.push(format!("session {session_id}: {failure}"));
             }
         }
         failures.extend(self.providers.shutdown_all().await);
 
         *self.state.write().await = HarnessRuntimeState::Stopped;
+        self.events.publish(RuntimeEventKind::RuntimeStopped {
+            failure_count: failures.len(),
+        });
         if failures.is_empty() {
             Ok(())
         } else {
@@ -237,7 +279,7 @@ fn ensure_running(state: HarnessRuntimeState) -> Result<(), HarnessRuntimeError>
     }
 }
 
-async fn stop_agent(_session_id: &SessionId, handle: AgentHandle, task: AgentTask) -> Vec<String> {
+async fn stop_agent(handle: AgentHandle, task: AgentTask) -> Vec<String> {
     let mut failures = Vec::new();
     if !task.is_finished()
         && let Err(error) = handle.shutdown().await

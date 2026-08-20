@@ -373,6 +373,7 @@ dependencies = [
 name = "harness-config"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "harness-agent",
  "harness-llm",
  "harness-runtime",
@@ -427,6 +428,7 @@ dependencies = [
 name = "harness-runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "harness-agent",
  "harness-llm",
  "harness-provider-host",
@@ -436,6 +438,7 @@ dependencies = [
  "harness-storage-local",
  "harness-tools",
  "harness-types",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

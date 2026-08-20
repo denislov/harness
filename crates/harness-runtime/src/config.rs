@@ -4,6 +4,8 @@ use harness_provider_host::ProviderHostConfig;
 use harness_provider_protocol::RuntimeInfo;
 use harness_types::ProviderId;
 
+use crate::CredentialKey;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HarnessRuntimeInfo {
     pub name: String,
@@ -38,6 +40,7 @@ pub struct ProviderProcessSpec {
     program: PathBuf,
     args: Vec<OsString>,
     env: BTreeMap<OsString, OsString>,
+    credential_env: BTreeMap<OsString, CredentialKey>,
     current_dir: Option<PathBuf>,
     request_timeout: Duration,
     shutdown_timeout: Duration,
@@ -52,6 +55,7 @@ impl ProviderProcessSpec {
             program: program.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            credential_env: BTreeMap::new(),
             current_dir: None,
             request_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(5),
@@ -71,6 +75,11 @@ impl ProviderProcessSpec {
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         let _ = self.env.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn credential_env(mut self, key: impl Into<OsString>, credential: CredentialKey) -> Self {
+        let _ = self.credential_env.insert(key.into(), credential);
         self
     }
 
@@ -97,6 +106,18 @@ impl ProviderProcessSpec {
     pub fn stderr_history_lines(mut self, value: usize) -> Self {
         self.stderr_history_lines = value;
         self
+    }
+
+    pub(crate) fn environment_conflict(&self) -> Option<&OsString> {
+        self.credential_env
+            .keys()
+            .find(|key| self.env.contains_key(*key))
+    }
+
+    pub(crate) fn credential_bindings(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&OsString, &CredentialKey)> {
+        self.credential_env.iter()
     }
 
     pub(crate) fn host_config(&self, runtime: &HarnessRuntimeInfo) -> ProviderHostConfig {

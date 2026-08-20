@@ -5,12 +5,22 @@ name = "harness-cli"
 data_dir = ".harness"
 default_profile = "default"
 
+[observability]
+runtime_events_jsonl = ".harness/runtime-events.jsonl"
+
+# Secrets stay outside this file. A Provider can map one of these credential
+# names into a subprocess environment key via its `credentials` table.
+# [credentials.openai]
+# source = "env"
+# variable = "OPENAI_API_KEY"
+
 [[providers]]
 id = "example-python"
 program = "python3"
 args = ["providers/example-python/provider.py"]
 request_timeout_ms = 5000
 shutdown_timeout_ms = 2000
+# credentials = { OPENAI_API_KEY = "openai" }
 
 [profiles.default]
 policy = "allow-all"

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,7 +32,7 @@ pub enum CliError {
     #[error("Agent profile {0:?} is not configured")]
     ProfileNotFound(String),
 
-    #[error("session is waiting for an approval; Batch 16 CLI only supports allow-all policy")]
+    #[error("session is waiting for an approval; CLI run cannot continue interactively")]
     ApprovalPending,
 
     #[error("session execution is recovery-blocked: {0}")]
@@ -38,6 +40,19 @@ pub enum CliError {
 
     #[error("event sequence cannot advance while reading Session history: {0}")]
     EventSequence(String),
+
+    #[error("runtime event observer lagged and skipped {skipped} event(s)")]
+    ObservabilityLagged { skipped: u64 },
+
+    #[error("runtime event observer task failed: {0}")]
+    ObservabilityTask(#[source] Box<tokio::task::JoinError>),
+
+    #[error("failed to serialize RuntimeEvent for {path}: {source}")]
+    RuntimeEventSerialize {
+        path: PathBuf,
+        #[source]
+        source: Box<serde_json::Error>,
+    },
 
     #[error("I/O failure while {context}: {source}")]
     Io {

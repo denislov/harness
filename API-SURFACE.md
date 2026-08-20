@@ -1802,3 +1802,72 @@ harness --config <FILE> inspect <SESSION_ID> [--pretty]
 ```
 
 Batch 16 CLI identity generation uses UUID v4 while preserving existing opaque prefixes (`ses_`, `agt_`, `evt_`, `msg_`).
+
+# Batch 17 Public API Surface
+
+## `harness-runtime`
+
+New public credential types:
+
+```rust
+CredentialKey
+CredentialKeyError
+SecretValue
+CredentialResolveError
+CredentialResolver
+RejectingCredentialResolver
+```
+
+`HarnessRuntimeBuilder` gains:
+
+```rust
+fn credential_resolver(self, Arc<dyn CredentialResolver>) -> Self
+fn runtime_event_bus(self, RuntimeEventBus) -> Self
+```
+
+`ProviderProcessSpec` gains:
+
+```rust
+fn credential_env(self, key: impl Into<OsString>, credential: CredentialKey) -> Self
+```
+
+New public operational event surface:
+
+```rust
+RuntimeEvent
+RuntimeEventKind
+RuntimeBuildStage
+RuntimeEventBus
+RuntimeEventBusError
+RUNTIME_EVENT_SCHEMA_VERSION
+DEFAULT_RUNTIME_EVENT_CAPACITY
+```
+
+`HarnessRuntime` gains:
+
+```rust
+fn events(&self) -> &RuntimeEventBus
+```
+
+## `harness-config`
+
+New configuration DTOs:
+
+```rust
+CredentialConfig
+ObservabilityConfig
+EnvironmentCredentialResolver
+```
+
+`RuntimePlan` gains:
+
+```rust
+fn credential_count(&self) -> usize
+fn runtime_events_jsonl(&self) -> Option<&Path>
+```
+
+`RuntimePlan::runtime_builder` now wires its compiled `CredentialResolver` into `HarnessRuntimeBuilder`.
+
+## `harness-cli`
+
+No new command is introduced. `run` optionally starts the configured RuntimeEvent JSONL recorder; `config check`, `session create`, and `inspect` remain offline with respect to Provider and credential resolution.

@@ -4,16 +4,18 @@
 //! composition input; durable SessionEvent history remains the execution source
 //! of truth.
 
+mod credentials;
 mod error;
 mod loader;
 mod model;
 mod plan;
 
+pub use credentials::EnvironmentCredentialResolver;
 pub use error::HarnessConfigError;
 pub use loader::LoadedHarnessConfig;
 pub use model::{
-    HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig, ModelConfig, PolicyConfig, ProfileConfig,
-    ProviderConfig, RuntimeConfig, ToolConfig,
+    CredentialConfig, HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig, ModelConfig,
+    ObservabilityConfig, PolicyConfig, ProfileConfig, ProviderConfig, RuntimeConfig, ToolConfig,
 };
 pub use plan::RuntimePlan;
 
@@ -112,18 +114,52 @@ input_schema = '''{"type":"object","examples":[null]}'''
     }
 
     #[test]
-    fn static_compile_does_not_start_or_require_provider_process() {
+    fn static_compile_does_not_start_or_require_provider_process_or_credentials() {
+        let path = temp_config(
+            r#"
+schema_version = 1
+
+[observability]
+runtime_events_jsonl = "logs/runtime-events.jsonl"
+
+[credentials.token]
+source = "env"
+variable = "HARNESS_CONFIG_TEST_NOT_REQUIRED_DURING_COMPILE"
+
+[[providers]]
+id = "offline-provider"
+program = "./definitely-not-present"
+credentials = { TOKEN = "token" }
+"#,
+        );
+        let loaded = LoadedHarnessConfig::load(path).unwrap();
+        let plan = loaded.compile().unwrap();
+        assert_eq!(plan.provider_count(), 1);
+        assert_eq!(plan.credential_count(), 1);
+        let expected_events = loaded.base_dir().join("logs/runtime-events.jsonl");
+        assert_eq!(plan.runtime_events_jsonl(), Some(expected_events.as_path()));
+    }
+
+    #[test]
+    fn rejects_unknown_provider_credential_reference() {
         let path = temp_config(
             r#"
 schema_version = 1
 
 [[providers]]
-id = "offline-provider"
-program = "./definitely-not-present"
+id = "provider"
+program = "provider"
+credentials = { TOKEN = "missing" }
 "#,
         );
-        let plan = LoadedHarnessConfig::load(path).unwrap().compile().unwrap();
-        assert_eq!(plan.provider_count(), 1);
+        let error = match LoadedHarnessConfig::load(path).unwrap().compile() {
+            Ok(_) => panic!("config unexpectedly compiled"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            HarnessConfigError::UnknownCredentialReference { .. }
+        ));
     }
 
     #[test]

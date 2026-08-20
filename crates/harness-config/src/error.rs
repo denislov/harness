@@ -29,11 +29,31 @@ pub enum HarnessConfigError {
     #[error("invalid Harness config: {0}")]
     Invalid(String),
 
+    #[error("credential {credential:?} is invalid: {message}")]
+    InvalidCredential { credential: String, message: String },
+
     #[error("provider id {value:?} cannot be represented by Harness: {message}")]
     InvalidProviderId { value: String, message: String },
 
     #[error("provider {0} is configured more than once")]
     DuplicateProvider(String),
+
+    #[error(
+        "provider {provider:?} configures environment key {environment:?} in both env and credentials"
+    )]
+    ProviderEnvironmentConflict {
+        provider: String,
+        environment: String,
+    },
+
+    #[error(
+        "provider {provider:?} environment key {environment:?} references credential {credential:?}, which is not configured"
+    )]
+    UnknownCredentialReference {
+        provider: String,
+        environment: String,
+        credential: String,
+    },
 
     #[error("profile {profile:?} references provider {provider:?}, which is not configured")]
     UnknownProviderReference { profile: String, provider: String },

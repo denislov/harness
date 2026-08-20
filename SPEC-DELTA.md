@@ -1044,3 +1044,15 @@ See `spec/batch-14-runtime-composition.md` for the complete contract.
 9. `harness session create` and `harness inspect` operate directly on the configured durable local SessionStore and do not require Provider startup.
 10. CLI-generated opaque identifiers use UUID v4 values with the existing recommended Harness prefixes.
 11. Daemon/server operation, remote control, full credentials, RuntimeEvent observability, and dynamic Provider membership remain outside Batch 16.
+
+# Batch 17 Spec Delta
+
+1. `CredentialResolver` becomes the process-level seam for converting a non-secret credential key into secret material immediately before Provider start.
+2. Resolved secrets are never SessionEvents or RuntimeEvents and `SecretValue` has a redacted `Debug` representation.
+3. Plain Provider environment values and credential-backed environment values may not target the same environment key.
+4. Static config compilation never resolves credentials. Environment-backed credentials are resolved only during Runtime Provider composition.
+5. `RuntimeEvent` is explicitly non-durable operational observation and cannot be used as replay input.
+6. RuntimeEvent `seq` is process-local and independent from SessionEvent `seq`.
+7. Runtime/Provider/Agent lifecycle transitions publish typed RuntimeEvents; arbitrary underlying error strings are omitted from those events.
+8. The CLI may append RuntimeEvents to JSONL, but observer lag/failure does not change Agent or Session semantics.
+9. Batch 16 `HarnessRuntimeInfo` construction is changed to struct-update initialization to satisfy `clippy::field_reassign_with_default` without lint suppression.

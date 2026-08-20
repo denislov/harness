@@ -11,6 +11,10 @@ pub struct HarnessConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, CredentialConfig>,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -36,6 +40,19 @@ impl Default for RuntimeConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ObservabilityConfig {
+    #[serde(default)]
+    pub runtime_events_jsonl: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "source", rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CredentialConfig {
+    Env { variable: String },
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderConfig {
     pub id: String,
@@ -46,6 +63,8 @@ pub struct ProviderConfig {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, String>,
     #[serde(default = "default_provider_request_timeout_ms")]
     pub request_timeout_ms: u64,
     #[serde(default = "default_provider_shutdown_timeout_ms")]

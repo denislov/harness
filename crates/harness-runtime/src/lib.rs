@@ -1,25 +1,35 @@
 //! Process-level composition root for the language-agnostic Harness.
 //!
-//! Batch 14 turns this crate from a scaffold into the owner of static Provider
-//! and Agent-profile composition plus dynamic Agent lifecycle. Durable Session
-//! truth and Agent state-machine decisions remain in their lower-level crates.
+//! `HarnessRuntime` owns static capability composition plus process-local Agent,
+//! Provider, credential and observability lifecycles. Durable Session truth and
+//! Agent state-machine decisions remain in their lower-level crates.
 
 mod agent_registry;
 mod builder;
 mod config;
+mod credential;
 mod error;
 mod identity;
 mod llm_registry;
 mod profile;
 mod provider_registry;
 mod runtime;
+mod runtime_event;
 
 pub use agent_registry::AgentRegistry;
 pub use builder::HarnessRuntimeBuilder;
 pub use config::{HarnessRuntimeInfo, ProviderProcessSpec};
+pub use credential::{
+    CredentialKey, CredentialKeyError, CredentialResolveError, CredentialResolver,
+    RejectingCredentialResolver, SecretValue,
+};
 pub use error::{HarnessRuntimeBuildError, HarnessRuntimeError};
 pub use identity::RuntimeIdSource;
 pub use llm_registry::LlmRegistry;
 pub use profile::{AgentProfile, ModelBinding, ProfileRegistry, RuntimeToolBinding};
 pub use provider_registry::ProviderRegistry;
 pub use runtime::{HarnessRuntime, HarnessRuntimeState};
+pub use runtime_event::{
+    DEFAULT_RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_SCHEMA_VERSION, RuntimeBuildStage, RuntimeEvent,
+    RuntimeEventBus, RuntimeEventBusError, RuntimeEventKind,
+};

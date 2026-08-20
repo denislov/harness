@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -7,7 +8,8 @@ use std::{
 
 use harness_llm::ModelOptions;
 use harness_runtime::{
-    AgentProfile, HarnessRuntimeInfo, ModelBinding, ProviderProcessSpec, RuntimeToolBinding,
+    AgentProfile, CredentialKey, CredentialResolver, HarnessRuntimeInfo, ModelBinding,
+    ProviderProcessSpec, RuntimeToolBinding,
 };
 use harness_tools::{
     AllowAllToolPolicy, ToolArgumentValidationError, ToolArgumentValidator, ToolDefinition,
@@ -15,8 +17,8 @@ use harness_tools::{
 use harness_types::{JsonText, ProviderId};
 
 use crate::{
-    HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig, HarnessConfigError, PolicyConfig, RuntimePlan,
-    ToolConfig,
+    CredentialConfig, EnvironmentCredentialResolver, HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig,
+    HarnessConfigError, PolicyConfig, RuntimePlan, ToolConfig,
 };
 
 #[derive(Clone, Debug)]
@@ -117,8 +119,58 @@ fn compile_config(
     }
 
     let data_dir = resolve_path(base_dir, &config.runtime.data_dir);
-    let mut runtime_info = HarnessRuntimeInfo::default();
-    runtime_info.name = config.runtime.name.clone();
+    let runtime_info = HarnessRuntimeInfo {
+        name: config.runtime.name.clone(),
+        ..HarnessRuntimeInfo::default()
+    };
+    let runtime_events_jsonl = config
+        .observability
+        .runtime_events_jsonl
+        .as_ref()
+        .map(|path| resolve_path(base_dir, path));
+    if runtime_events_jsonl
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err(HarnessConfigError::Invalid(
+            "observability.runtime_events_jsonl must not be empty".to_owned(),
+        ));
+    }
+
+    let mut credential_keys = BTreeMap::new();
+    let mut credential_variables = BTreeMap::new();
+    for (name, credential) in &config.credentials {
+        let key = CredentialKey::new(name.clone()).map_err(|error| {
+            HarnessConfigError::InvalidCredential {
+                credential: name.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        match credential {
+            CredentialConfig::Env { variable } => {
+                if variable.trim().is_empty() {
+                    return Err(HarnessConfigError::InvalidCredential {
+                        credential: name.clone(),
+                        message: "environment variable name must not be empty".to_owned(),
+                    });
+                }
+                let previous =
+                    credential_variables.insert(key.clone(), OsString::from(variable.as_str()));
+                debug_assert!(
+                    previous.is_none(),
+                    "credential names originate from TOML table keys"
+                );
+            }
+        }
+        let previous = credential_keys.insert(name.clone(), key);
+        debug_assert!(
+            previous.is_none(),
+            "credential names originate from TOML table keys"
+        );
+    }
+    let credential_count = credential_variables.len();
+    let credential_resolver: Arc<dyn CredentialResolver> =
+        Arc::new(EnvironmentCredentialResolver::new(credential_variables));
 
     let mut provider_ids = BTreeSet::new();
     let mut provider_id_values = BTreeMap::new();
@@ -170,6 +222,29 @@ fn compile_config(
                 )));
             }
             spec = spec.env(key.clone(), value.clone());
+        }
+        for (environment, credential_name) in &provider.credentials {
+            if environment.trim().is_empty() {
+                return Err(HarnessConfigError::Invalid(format!(
+                    "provider {:?} contains an empty credential environment key",
+                    provider.id
+                )));
+            }
+            if provider.env.contains_key(environment) {
+                return Err(HarnessConfigError::ProviderEnvironmentConflict {
+                    provider: provider.id.clone(),
+                    environment: environment.clone(),
+                });
+            }
+            let credential = credential_keys
+                .get(credential_name)
+                .cloned()
+                .ok_or_else(|| HarnessConfigError::UnknownCredentialReference {
+                    provider: provider.id.clone(),
+                    environment: environment.clone(),
+                    credential: credential_name.clone(),
+                })?;
+            spec = spec.credential_env(environment.clone(), credential);
         }
         providers.push(spec);
     }
@@ -273,6 +348,9 @@ fn compile_config(
         providers,
         profiles,
         default_profile: config.runtime.default_profile.clone(),
+        credential_resolver,
+        credential_count,
+        runtime_events_jsonl,
     })
 }
 

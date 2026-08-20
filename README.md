@@ -1212,3 +1212,17 @@ cargo run -p harness-cli --bin harness -- inspect "$SESSION_ID"
 ```
 
 The `run` command is intentionally foreground/interactive in Batch 16. `/quit` gracefully closes the live Agent and then shuts the Runtime/Providers down; Session history remains in Batch 15 durable local storage and can be reopened by a later CLI process.
+
+# Harness API Batch 17
+
+Batch 17 adds process-level credential resolution and RuntimeEvent observability while preserving SessionEvent as the only durable Agent execution truth.
+
+Key additions:
+
+- `CredentialResolver`, redacted `SecretValue`, and Provider credential env bindings;
+- env-backed credential references in `harness.toml` without secret values in the file;
+- typed `RuntimeEventBus` for Runtime/Provider/Agent lifecycle observation;
+- optional `observability.runtime_events_jsonl` output for CLI `run`;
+- explicit separation between lossy operational RuntimeEvents and durable SessionEvents.
+
+See `spec/batch-17-credentials-runtime-events.md` for normative semantics.

@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 harness-agent = { path = "../harness-agent" }
 harness-llm = { path = "../harness-llm" }
 harness-runtime = { path = "../harness-runtime" }
@@ -16,4 +17,3 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-

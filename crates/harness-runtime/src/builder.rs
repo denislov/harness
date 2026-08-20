@@ -6,9 +6,10 @@ use harness_storage::BlobStore;
 use harness_storage_local::{DurableLocalStorage, MemoryBlobStore, MemorySessionStore};
 
 use crate::{
-    AgentProfile, HarnessRuntime, HarnessRuntimeBuildError, HarnessRuntimeInfo, LlmRegistry,
-    ProfileRegistry, ProviderProcessSpec, ProviderRegistry, RuntimeIdSource,
-    runtime::HarnessRuntimeParts,
+    AgentProfile, CredentialResolver, HarnessRuntime, HarnessRuntimeBuildError, HarnessRuntimeInfo,
+    LlmRegistry, ProfileRegistry, ProviderProcessSpec, ProviderRegistry,
+    RejectingCredentialResolver, RuntimeBuildStage, RuntimeEventBus, RuntimeEventKind,
+    RuntimeIdSource, runtime::HarnessRuntimeParts,
 };
 
 pub struct HarnessRuntimeBuilder {
@@ -19,6 +20,8 @@ pub struct HarnessRuntimeBuilder {
     blob_store: Option<Arc<dyn BlobStore>>,
     event_source: Option<Arc<dyn AgentEventSource>>,
     id_source: Option<Arc<dyn RuntimeIdSource>>,
+    credential_resolver: Arc<dyn CredentialResolver>,
+    runtime_events: RuntimeEventBus,
 }
 
 impl Default for HarnessRuntimeBuilder {
@@ -37,6 +40,8 @@ impl HarnessRuntimeBuilder {
             blob_store: None,
             event_source: None,
             id_source: None,
+            credential_resolver: Arc::new(RejectingCredentialResolver),
+            runtime_events: RuntimeEventBus::default(),
         }
     }
 
@@ -52,8 +57,8 @@ impl HarnessRuntimeBuilder {
             .id_source(id_source)
     }
 
-    /// Opens the conventional Batch 15 durable local storage layout and wires
-    /// it into this builder. Provider/profile configuration remains explicit.
+    /// Opens the conventional durable local storage layout and wires it into
+    /// this builder. Provider/profile configuration remains explicit.
     pub fn durable_local(
         root: impl Into<PathBuf>,
         event_source: Arc<dyn AgentEventSource>,
@@ -96,6 +101,16 @@ impl HarnessRuntimeBuilder {
         self
     }
 
+    pub fn credential_resolver(mut self, resolver: Arc<dyn CredentialResolver>) -> Self {
+        self.credential_resolver = resolver;
+        self
+    }
+
+    pub fn runtime_event_bus(mut self, events: RuntimeEventBus) -> Self {
+        self.runtime_events = events;
+        self
+    }
+
     pub fn provider(mut self, spec: ProviderProcessSpec) -> Self {
         self.provider_specs.push(spec);
         self
@@ -107,50 +122,90 @@ impl HarnessRuntimeBuilder {
     }
 
     pub async fn build(self) -> Result<HarnessRuntime, HarnessRuntimeBuildError> {
+        self.runtime_events
+            .publish(RuntimeEventKind::RuntimeBuildStarted {
+                name: self.runtime_info.name.clone(),
+                version: self.runtime_info.version.clone(),
+            });
+
         if !self.runtime_info.validate() {
+            publish_build_failed(&self.runtime_events, RuntimeBuildStage::Preflight);
             return Err(HarnessRuntimeBuildError::InvalidRuntimeInfo);
         }
-        ProviderRegistry::validate_specs(&self.provider_specs)?;
-        ProfileRegistry::validate_specs(&self.profile_specs)?;
+        if let Err(error) = ProviderRegistry::validate_specs(&self.provider_specs) {
+            publish_build_failed(&self.runtime_events, RuntimeBuildStage::Preflight);
+            return Err(error);
+        }
+        if let Err(error) = ProfileRegistry::validate_specs(&self.profile_specs) {
+            publish_build_failed(&self.runtime_events, RuntimeBuildStage::Preflight);
+            return Err(error);
+        }
 
-        let session_store = self
-            .session_store
-            .ok_or(HarnessRuntimeBuildError::MissingSessionStore)?;
-        let blob_store = self
-            .blob_store
-            .ok_or(HarnessRuntimeBuildError::MissingBlobStore)?;
-        let event_source = self
-            .event_source
-            .ok_or(HarnessRuntimeBuildError::MissingEventSource)?;
-        let id_source = self
-            .id_source
-            .ok_or(HarnessRuntimeBuildError::MissingIdSource)?;
+        let Self {
+            runtime_info,
+            provider_specs,
+            profile_specs,
+            session_store,
+            blob_store,
+            event_source,
+            id_source,
+            credential_resolver,
+            runtime_events,
+        } = self;
 
-        let providers = ProviderRegistry::start(self.provider_specs, &self.runtime_info).await?;
-        let llms = match LlmRegistry::from_providers(&providers).await {
-            Ok(llms) => llms,
-            Err(error) => {
-                let _ = providers.shutdown_all().await;
-                return Err(error);
-            }
+        let Some(session_store) = session_store else {
+            publish_build_failed(&runtime_events, RuntimeBuildStage::Preflight);
+            return Err(HarnessRuntimeBuildError::MissingSessionStore);
         };
-        let profiles = match ProfileRegistry::compile(
-            self.profile_specs,
-            &providers,
-            &llms,
-            blob_store.clone(),
+        let Some(blob_store) = blob_store else {
+            publish_build_failed(&runtime_events, RuntimeBuildStage::Preflight);
+            return Err(HarnessRuntimeBuildError::MissingBlobStore);
+        };
+        let Some(event_source) = event_source else {
+            publish_build_failed(&runtime_events, RuntimeBuildStage::Preflight);
+            return Err(HarnessRuntimeBuildError::MissingEventSource);
+        };
+        let Some(id_source) = id_source else {
+            publish_build_failed(&runtime_events, RuntimeBuildStage::Preflight);
+            return Err(HarnessRuntimeBuildError::MissingIdSource);
+        };
+
+        let providers = match ProviderRegistry::start(
+            provider_specs,
+            &runtime_info,
+            credential_resolver,
+            runtime_events.clone(),
         )
         .await
         {
-            Ok(profiles) => profiles,
+            Ok(providers) => providers,
             Err(error) => {
+                publish_build_failed(&runtime_events, RuntimeBuildStage::Provider);
+                return Err(error);
+            }
+        };
+        let llms = match LlmRegistry::from_providers(&providers).await {
+            Ok(llms) => llms,
+            Err(error) => {
+                publish_build_failed(&runtime_events, RuntimeBuildStage::Llm);
                 let _ = providers.shutdown_all().await;
                 return Err(error);
             }
         };
+        let profiles =
+            match ProfileRegistry::compile(profile_specs, &providers, &llms, blob_store.clone())
+                .await
+            {
+                Ok(profiles) => profiles,
+                Err(error) => {
+                    publish_build_failed(&runtime_events, RuntimeBuildStage::Profile);
+                    let _ = providers.shutdown_all().await;
+                    return Err(error);
+                }
+            };
 
-        Ok(HarnessRuntime::from_parts(HarnessRuntimeParts {
-            info: self.runtime_info,
+        let runtime = HarnessRuntime::from_parts(HarnessRuntimeParts {
+            info: runtime_info.clone(),
             providers,
             llms,
             profiles,
@@ -158,6 +213,16 @@ impl HarnessRuntimeBuilder {
             blob_store,
             event_source,
             id_source,
-        }))
+            events: runtime_events.clone(),
+        });
+        runtime_events.publish(RuntimeEventKind::RuntimeStarted {
+            name: runtime_info.name,
+            version: runtime_info.version,
+        });
+        Ok(runtime)
     }
+}
+
+fn publish_build_failed(events: &RuntimeEventBus, stage: RuntimeBuildStage) {
+    events.publish(RuntimeEventKind::RuntimeBuildFailed { stage });
 }

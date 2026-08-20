@@ -41,6 +41,13 @@ schema_version = 1
 data_dir = "state"
 default_profile = "default"
 
+[observability]
+runtime_events_jsonl = "runtime-events.jsonl"
+
+[credentials.cli-test-path]
+source = "env"
+variable = "PATH"
+
 [[providers]]
 id = "example-python"
 program = "{}"
@@ -48,6 +55,7 @@ args = ["providers/example-python/provider.py"]
 cwd = "{}"
 request_timeout_ms = 5000
 shutdown_timeout_ms = 2000
+credentials = { HARNESS_CLI_TEST_PATH = "cli-test-path" }
 
 [profiles.default]
 policy = "allow-all"
@@ -163,6 +171,16 @@ fn config_session_run_and_inspect_form_a_durable_cli_shell() {
     assert!(events.contains("\"type\":\"session/created\""));
     assert!(events.contains("hello from cli"));
     assert!(events.contains("second turn"));
+
+    let runtime_events = fs::read_to_string(root.join("runtime-events.jsonl")).unwrap();
+    assert!(runtime_events.contains("\"type\":\"runtime/started\""));
+    assert!(runtime_events.contains("\"type\":\"provider/ready\""));
+    assert!(runtime_events.contains("\"type\":\"agent/opened\""));
+    assert!(runtime_events.contains("\"type\":\"runtime/stopped\""));
+    if let Ok(path_secret) = std::env::var("PATH") {
+        assert!(!path_secret.is_empty());
+        assert!(!runtime_events.contains(&path_secret));
+    }
 
     fs::remove_dir_all(root).unwrap();
 }

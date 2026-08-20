@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 harness-agent = { path = "../harness-agent" }
 harness-llm = { path = "../harness-llm" }
 harness-provider-host = { path = "../harness-provider-host" }
@@ -16,6 +17,7 @@ harness-storage = { path = "../harness-storage" }
 harness-storage-local = { path = "../harness-storage-local" }
 harness-tools = { path = "../harness-tools" }
 harness-types = { path = "../harness-types" }
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

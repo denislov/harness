@@ -5,7 +5,7 @@ use std::{
 
 use harness_agent::{AgentHandle, AgentState, ExecutionGate};
 use harness_config::{LoadedHarnessConfig, RuntimePlan};
-use harness_runtime::HarnessRuntime;
+use harness_runtime::{HarnessRuntime, RuntimeEventBus};
 use harness_session::{
     CreateSession, SessionCreated, SessionEvent, SessionEventPayload, SessionStore,
 };
@@ -16,6 +16,7 @@ use crate::{
     cli::{Cli, Command, ConfigCommand, InspectArgs, RunArgs, SessionCommand},
     error::CliError,
     identity::UuidIdentitySource,
+    observability::RuntimeEventLog,
 };
 
 const READ_PAGE_SIZE: usize = 256;
@@ -44,11 +45,15 @@ pub async fn execute(cli: Cli) -> Result<(), CliError> {
 
 fn config_check(loaded: &LoadedHarnessConfig, plan: &RuntimePlan) {
     println!(
-        "config ok: {} (providers={}, profiles={}, data_dir={})",
+        "config ok: {} (providers={}, profiles={}, credentials={}, data_dir={}, runtime_events={})",
         loaded.source_path().display(),
         plan.provider_count(),
         plan.profile_count(),
-        plan.data_dir().display()
+        plan.credential_count(),
+        plan.data_dir().display(),
+        plan.runtime_events_jsonl()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "disabled".to_owned())
     );
 }
 
@@ -96,6 +101,23 @@ async fn inspect(args: InspectArgs, plan: &RuntimePlan) -> Result<(), CliError> 
 }
 
 async fn run(args: RunArgs, plan: &RuntimePlan) -> Result<(), CliError> {
+    let (session_id, profile) = resolve_run_target(args, plan)?;
+    let events = RuntimeEventBus::default();
+    let event_log = plan
+        .runtime_events_jsonl()
+        .map(|path| RuntimeEventLog::start(path, &events))
+        .transpose()?;
+    let result = run_with_events(session_id, profile, plan, events).await;
+    let observation = match event_log {
+        Some(log) => log.stop().await,
+        None => Ok(()),
+    };
+    result?;
+    observation?;
+    Ok(())
+}
+
+fn resolve_run_target(args: RunArgs, plan: &RuntimePlan) -> Result<(SessionId, String), CliError> {
     let session_id = parse_session_id(args.session_id)?;
     let profile = args
         .profile
@@ -106,10 +128,20 @@ async fn run(args: RunArgs, plan: &RuntimePlan) -> Result<(), CliError> {
     if !plan.contains_profile(&profile) {
         return Err(CliError::ProfileNotFound(profile));
     }
+    Ok((session_id, profile))
+}
+
+async fn run_with_events(
+    session_id: SessionId,
+    profile: String,
+    plan: &RuntimePlan,
+    events: RuntimeEventBus,
+) -> Result<(), CliError> {
     let identity = Arc::new(UuidIdentitySource);
     let builder = plan
         .runtime_builder(identity.clone(), identity.clone())
-        .map_err(|error| CliError::RuntimeBuild(Box::new(error)))?;
+        .map_err(|error| CliError::RuntimeBuild(Box::new(error)))?
+        .runtime_event_bus(events);
     let runtime = builder
         .build()
         .await
