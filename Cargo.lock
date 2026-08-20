@@ -208,7 +208,14 @@ dependencies = [
 name = "harness-provider-host"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "harness-agent",
+ "harness-llm",
  "harness-provider-protocol",
+ "harness-session",
+ "harness-storage-local",
+ "harness-tools",
+ "harness-types",
  "serde",
  "serde_json",
  "thiserror",

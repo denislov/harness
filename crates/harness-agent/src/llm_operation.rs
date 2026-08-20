@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use futures_util::StreamExt;
 use harness_llm::{LlmProvider, LlmStreamAssembler, LlmStreamOutcome, ModelRequest};
 use harness_session::StepPosition;
-use harness_types::{ErrorCode, PortableError, RequestId};
+use harness_types::{CancelCause, ErrorCode, PortableError, RequestId};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::MailboxMessage;
@@ -24,8 +24,9 @@ pub(crate) fn spawn_llm_operation(
 ) -> JoinHandle<()> {
     let request_id = request.request_id.clone();
     tokio::spawn(async move {
+        let stream_provider = provider.clone();
         let operation = async move {
-            let mut stream = provider.stream(request);
+            let mut stream = stream_provider.stream(request);
             let mut assembler = LlmStreamAssembler::new();
 
             loop {
@@ -51,10 +52,17 @@ pub(crate) fn spawn_llm_operation(
         let outcome = match tokio::time::timeout(Duration::from_millis(timeout_ms), operation).await
         {
             Ok(outcome) => outcome,
-            Err(_) => Err(PortableError::new(
-                ErrorCode::DeadlineExceeded,
-                format!("model request {request_id} exceeded timeout of {timeout_ms} ms"),
-            )),
+            Err(_) => {
+                // Provider cancellation is best effort. The durable timeout
+                // outcome remains authoritative even if the transport is gone.
+                let _ = provider
+                    .cancel(request_id.clone(), CancelCause::Timeout)
+                    .await;
+                Err(PortableError::new(
+                    ErrorCode::DeadlineExceeded,
+                    format!("model request {request_id} exceeded timeout of {timeout_ms} ms"),
+                ))
+            }
         };
 
         let _ = tx

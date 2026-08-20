@@ -10,7 +10,7 @@ mod request;
 mod stream;
 
 pub use assembler::{LlmStreamAssembler, LlmStreamOutcome, StreamAssemblyError};
-pub use provider::{LlmEventStream, LlmProvider};
+pub use provider::{LlmCancelFuture, LlmEventStream, LlmProvider};
 pub use request::{
     ModelOptions, ModelRequest, ModelRequestConfig, ModelRequestError, ModelSnapshotError,
     ModelToolSpec,

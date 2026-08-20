@@ -1047,3 +1047,60 @@ python3 conformance/provider_protocol_v1_smoke.py
 ```
 
 The provider itself has no third-party Python dependencies.
+
+# Harness API Batch 11
+
+Batch 11 connects the Batch 10 subprocess Provider Host to the provider-neutral LLM and Tool seams used by Agent Core.
+
+Baseline GitHub commit:
+
+```text
+48ce34dc370d27f0b4dfe08cde2b1aa28ad8ed91
+```
+
+## What changes
+
+- adds `ProviderHostLlmAdapter : LlmProvider`;
+- adds `ProviderHostToolAdapter : ToolExecutor`;
+- keeps `harness-provider-protocol` wire-only;
+- adds domain/wire conversion and stable ProviderHost error normalization;
+- validates Core ToolDefinition semantics against the provider manifest;
+- adds default no-op cancellation hooks to `LlmProvider` and `ToolExecutor`;
+- maps Agent cancellation/timeout to Provider Protocol `capability.cancel` on a best-effort basis;
+- extends the Python reference provider with deterministic `agent-model` behavior;
+- adds a Rust integration test that spawns the real Python process and executes `user -> LLM -> Tool -> LLM -> final answer`.
+
+## Apply
+
+From the extracted Batch 11 directory:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The apply script verifies Git blob SHAs for every modified Batch 10 baseline file before performing any filesystem mutation.
+
+## Validation
+
+Run from the Harness workspace root:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+python3 -m py_compile providers/example-python/provider.py
+python3 conformance/provider_protocol_v1_smoke.py
+```
+
+The new Rust acceptance test is:
+
+```text
+harness-provider-host/tests/python_agent_vertical.rs
+```
+
+It uses `python3` by default. Set `PYTHON=/path/to/python` to override the executable.
+
+## Important semantic point
+
+Provider cancellation remains advisory. Agent durable cancellation and Tool unknown-outcome semantics remain authoritative. A successful `capability.cancel` notification is never treated as proof that an external side effect did not occur.

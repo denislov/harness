@@ -66,20 +66,30 @@ impl AgentActor {
         &mut self,
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
+        llm_runtime: Option<&crate::AgentLlmRuntime>,
         tool_runtime: Option<&crate::AgentToolRuntime>,
         cause: CancelCause,
         keep_inbox: bool,
     ) -> Result<(), AgentError> {
         let active_operation = self.state.active_operation.clone();
+        let cancel_target =
+            self.capability_cancel_target(llm_runtime, tool_runtime, active_operation.as_ref());
         let mut drafts = self.cancel_activity_drafts(event_source, tool_runtime, cause)?;
         if !keep_inbox {
             drafts.extend(self.discard_pending_inbox_drafts(event_source, cause));
         }
         if !drafts.is_empty() {
             // Durable convergence is the cancellation acknowledgement boundary.
-            // Only after it commits do we abort the process-local task. If the
-            // append fails, the live operation remains owned and may continue.
+            // Only after it commits do we signal/abort the process-local task. If
+            // the append fails, the live operation remains owned and may continue.
             self.append_validated(store, drafts).await?;
+        }
+
+        // Provider cancellation is advisory and deliberately occurs only after
+        // the durable terminal/recovery state is committed. A transport failure
+        // here cannot roll back the authoritative cancellation decision.
+        if let Some(target) = cancel_target {
+            target.signal(cause).await;
         }
 
         match active_operation {
@@ -101,6 +111,38 @@ impl AgentActor {
             }
         };
         Ok(())
+    }
+
+    fn capability_cancel_target(
+        &self,
+        llm_runtime: Option<&crate::AgentLlmRuntime>,
+        tool_runtime: Option<&crate::AgentToolRuntime>,
+        active: Option<&crate::ActiveAgentOperation>,
+    ) -> Option<CapabilityCancelTarget> {
+        match active? {
+            crate::ActiveAgentOperation::Model { request_id, .. } => {
+                let provider = llm_runtime?.provider().clone();
+                Some(CapabilityCancelTarget::Model {
+                    provider,
+                    request_id: request_id.clone(),
+                })
+            }
+            crate::ActiveAgentOperation::Tool {
+                call_id,
+                invocation_id,
+                ..
+            } => {
+                let pending = self.state.projection.pending_tool_calls.get(call_id)?;
+                let executor = tool_runtime?
+                    .resolve(&pending.data.tool)?
+                    .executor()
+                    .clone();
+                Some(CapabilityCancelTarget::Tool {
+                    executor,
+                    invocation_id: invocation_id.clone(),
+                })
+            }
+        }
     }
 
     fn cancel_activity_drafts(
@@ -387,6 +429,36 @@ impl AgentActor {
                 )
             })
             .collect()
+    }
+}
+
+enum CapabilityCancelTarget {
+    Model {
+        provider: std::sync::Arc<dyn harness_llm::LlmProvider>,
+        request_id: harness_types::RequestId,
+    },
+    Tool {
+        executor: std::sync::Arc<dyn harness_tools::ToolExecutor>,
+        invocation_id: harness_types::InvocationId,
+    },
+}
+
+impl CapabilityCancelTarget {
+    async fn signal(self, cause: CancelCause) {
+        match self {
+            Self::Model {
+                provider,
+                request_id,
+            } => {
+                let _ = provider.cancel(request_id, cause).await;
+            }
+            Self::Tool {
+                executor,
+                invocation_id,
+            } => {
+                let _ = executor.cancel(invocation_id, cause).await;
+            }
+        }
     }
 }
 

@@ -946,3 +946,35 @@ A dependency-free Python conformance runner launches the reference provider thro
 ## D-10.12 — Manifest is an executable capability fence
 
 The initialized manifest is not informational only. Host refuses undeclared Tool names and LLM models before sending a capability request, requires LLM provider identity to match the manifest provider id, and rejects `idempotent-write` Tool descriptors without keyed-idempotency support.
+
+# Batch 11 Spec Delta
+
+Batch 11 does not change the SessionEvent schema or Provider Protocol version. It connects two previously independent contracts.
+
+## D-11.1 — Provider Host owns domain adapters
+
+The protocol crate remains language-neutral and free of Harness domain dependencies. `harness-provider-host` is the dependency seam allowed to translate between wire and domain values.
+
+## D-11.2 — No adapter retries
+
+`ProviderHostLlmAdapter` and `ProviderHostToolAdapter` represent one provider attempt. They MUST NOT perform logical retries. Retry and recovery remain Core responsibilities.
+
+## D-11.3 — Tool manifest binding is semantic
+
+A Tool adapter binds to one named manifest capability. Core should reject mismatches in name, version, parallel-safety, or side-effect class before registration.
+
+## D-11.4 — Capability cancellation becomes a domain hook
+
+LLM and Tool provider-neutral traits gain best-effort cancellation hooks with source-compatible no-op defaults. Out-of-process adapters map them to `capability.cancel`.
+
+## D-11.5 — Durable state precedes cancellation signaling
+
+Explicit Agent cancellation commits the durable Batch 09 terminal/recovery result before signaling the external provider. Cancellation transport failure does not roll back durable state.
+
+## D-11.6 — Timeout signals Provider cancellation
+
+LLM/Tool timeout tasks issue best-effort `CancelCause::Timeout` through the domain hook before returning `DEADLINE_EXCEEDED` to the actor.
+
+## D-11.7 — Python subprocess is the first polyglot acceptance target
+
+`agent-model` on the reference Python provider deterministically emits an `echo` ToolCall on the first model step and a final text response after ToolResult is present. The Rust integration test must exercise the complete Agent lifecycle through this subprocess.

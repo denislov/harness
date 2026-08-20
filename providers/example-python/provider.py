@@ -2,6 +2,10 @@
 """SDK-free Provider Protocol v1 reference provider.
 
 stdout is protocol-only NDJSON. Diagnostics go to stderr.
+
+The original Batch 10 ``echo-model`` remains unchanged for protocol conformance.
+Batch 11 adds ``agent-model`` so the Rust Agent acceptance test can exercise a
+real out-of-process LLM -> Tool -> LLM loop through this Python process.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ def failure(rpc_id: str, code: int, message: str, data: Any | None = None) -> No
 def manifest() -> dict[str, Any]:
     return {
         "providerId": "example-python",
-        "providerVersion": "1.0.0",
+        "providerVersion": "1.1.0",
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": [
             {
@@ -43,7 +47,7 @@ def manifest() -> dict[str, Any]:
                 "sideEffect": "read-only",
                 "supportsIdempotencyKey": False,
             },
-            {"kind": "llm", "models": ["echo-model"]},
+            {"kind": "llm", "models": ["echo-model", "agent-model"]},
         ],
     }
 
@@ -56,25 +60,21 @@ def last_text(request: dict[str, Any]) -> str:
     return ""
 
 
-def emit_llm_stream(stream_id: str, text: str) -> None:
-    events = [
-        {
-            "type": "block-start",
-            "index": 0,
-            "blockType": "text",
-        },
-        {
-            "type": "text-delta",
-            "index": 0,
-            "text": text,
-        },
-        {
-            "type": "block-end",
-            "index": 0,
-            "block": {"type": "text", "text": text},
-        },
-        {"type": "finish", "reason": "completed"},
-    ]
+def trailing_tool_result_text(request: dict[str, Any]) -> str | None:
+    messages = request.get("messages", [])
+    if not messages:
+        return None
+    for block in reversed(messages[-1].get("content", [])):
+        if block.get("type") != "tool-result":
+            continue
+        for content in block.get("content", []):
+            if content.get("type") == "text":
+                return str(content.get("text", ""))
+        return ""
+    return None
+
+
+def emit_stream_events(stream_id: str, events: list[dict[str, Any]]) -> None:
     for seq, event in enumerate(events, start=1):
         emit(
             {
@@ -83,6 +83,68 @@ def emit_llm_stream(stream_id: str, text: str) -> None:
                 "params": {"streamId": stream_id, "seq": seq, "event": event},
             }
         )
+
+
+def emit_text_stream(stream_id: str, text: str) -> None:
+    emit_stream_events(
+        stream_id,
+        [
+            {"type": "block-start", "index": 0, "blockType": "text"},
+            {"type": "text-delta", "index": 0, "text": text},
+            {"type": "block-end", "index": 0, "block": {"type": "text", "text": text}},
+            {"type": "finish", "reason": "completed"},
+        ],
+    )
+
+
+def emit_tool_call_stream(
+    stream_id: str,
+    call_id: str,
+    tool_name: str,
+    arguments_json: str,
+) -> None:
+    emit_stream_events(
+        stream_id,
+        [
+            {"type": "block-start", "index": 0, "blockType": "tool-call"},
+            {
+                "type": "tool-call-delta",
+                "index": 0,
+                "callId": call_id,
+                "name": tool_name,
+                "argumentsDelta": arguments_json,
+            },
+            {
+                "type": "block-end",
+                "index": 0,
+                "block": {
+                    "type": "tool-call",
+                    "id": call_id,
+                    "name": tool_name,
+                    "argumentsJson": arguments_json,
+                },
+            },
+            {"type": "finish", "reason": "completed"},
+        ],
+    )
+
+
+def emit_agent_model_stream(stream_id: str, request: dict[str, Any]) -> None:
+    tool_result = trailing_tool_result_text(request)
+    if tool_result is not None:
+        emit_text_stream(stream_id, f"final: {tool_result}")
+        return
+
+    arguments_json = json.dumps(
+        {"text": last_text(request)}, separators=(",", ":"), ensure_ascii=False
+    )
+    request_id = str(request.get("requestId", "request"))
+    emit_tool_call_stream(
+        stream_id,
+        f"call_echo_{request_id}",
+        "echo",
+        arguments_json,
+    )
 
 
 def handle_request(message: dict[str, Any]) -> bool:
@@ -151,21 +213,25 @@ def handle_request(message: dict[str, Any]) -> bool:
         if params.get("operationId") != request.get("requestId"):
             failure(rpc_id, -32602, "operationId must equal request.requestId")
             return True
-        if request.get("model") != "echo-model":
+        model = request.get("model")
+        if model not in {"echo-model", "agent-model"}:
             success(
                 rpc_id,
                 {
                     "accepted": False,
                     "streamId": stream_id,
-                    "reason": f"unknown model: {request.get('model')}",
+                    "reason": f"unknown model: {model}",
                 },
             )
             return True
 
         # The response is flushed before the first llm.event. The streamId was
-        # allocated by Core, so Host may install routing before sending llm.start.
+        # allocated by Core, so Host installed routing before sending llm.start.
         success(rpc_id, {"accepted": True, "streamId": stream_id})
-        emit_llm_stream(stream_id, f"echo: {last_text(request)}")
+        if model == "agent-model":
+            emit_agent_model_stream(stream_id, request)
+        else:
+            emit_text_stream(stream_id, f"echo: {last_text(request)}")
         return True
 
     failure(rpc_id, -32601, f"method not found: {method}")
@@ -175,8 +241,8 @@ def handle_request(message: dict[str, Any]) -> bool:
 def handle_notification(message: dict[str, Any]) -> None:
     method = message.get("method")
     if method == "capability.cancel":
-        # This reference provider performs only immediate local work. A real
-        # provider would use operationId to cancel its in-flight task/future.
+        # This reference provider performs immediate local work. A real provider
+        # would use operationId to cancel its in-flight task/future.
         return
     print(f"unsupported notification: {method}", file=sys.stderr, flush=True)
 

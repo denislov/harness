@@ -7,8 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+harness-llm = { path = "../harness-llm" }
 harness-provider-protocol = { path = "../harness-provider-protocol" }
+harness-tools = { path = "../harness-tools" }
+harness-types = { path = "../harness-types" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+harness-agent = { path = "../harness-agent" }
+harness-session = { path = "../harness-session" }
+harness-storage-local = { path = "../harness-storage-local" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

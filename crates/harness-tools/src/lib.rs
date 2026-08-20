@@ -13,7 +13,7 @@ mod registry;
 mod validation;
 
 pub use definition::{ToolDefinition, ToolDefinitionError};
-pub use executor::{IdempotencySupport, ToolExecutionFuture, ToolExecutor};
+pub use executor::{IdempotencySupport, ToolCancelFuture, ToolExecutionFuture, ToolExecutor};
 pub use invocation::{ToolInvocation, ToolInvocationError, ToolInvocationPosition};
 pub use policy::{AllowAllToolPolicy, PolicyDecision, ToolPolicy, ToolPolicyInput};
 pub use registry::{ToolRegistration, ToolRegistry, ToolRegistryError};

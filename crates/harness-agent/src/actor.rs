@@ -712,6 +712,7 @@ impl AgentActor {
                         .handle_command(
                             store.as_ref(),
                             event_source.as_ref(),
+                            llm_runtime.as_ref(),
                             tool_runtime.as_ref(),
                             command,
                         )
@@ -786,6 +787,7 @@ impl AgentActor {
         &mut self,
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
+        llm_runtime: Option<&AgentLlmRuntime>,
         tool_runtime: Option<&AgentToolRuntime>,
         command: AgentCommand,
     ) -> Result<AgentCommandAck, AgentError> {
@@ -799,8 +801,15 @@ impl AgentActor {
                 .await
                 .map(AgentCommandAck::Send),
             AgentCommand::Cancel { cause, keep_inbox } => {
-                self.handle_cancel(store, event_source, tool_runtime, cause, keep_inbox)
-                    .await?;
+                self.handle_cancel(
+                    store,
+                    event_source,
+                    llm_runtime,
+                    tool_runtime,
+                    cause,
+                    keep_inbox,
+                )
+                .await?;
                 Ok(AgentCommandAck::Cancelled)
             }
             AgentCommand::ResolveApproval {

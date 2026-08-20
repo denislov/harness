@@ -1529,3 +1529,100 @@ providers/example-python/provider.py
 ```
 
 The smoke test launches the reference provider over real stdin/stdout pipes and verifies initialization, Tool RPC, Core-owned LLM stream routing, ordered events, and shutdown.
+
+# Batch 11 API Surface
+
+## harness-llm
+
+```rust
+pub type LlmCancelFuture =
+    Pin<Box<dyn Future<Output = Result<(), PortableError>> + Send + 'static>>;
+
+pub trait LlmProvider: Send + Sync {
+    fn provider_id(&self) -> &ProviderId;
+    fn stream(&self, request: ModelRequest) -> LlmEventStream;
+    fn cancel(&self, request_id: RequestId, cause: CancelCause) -> LlmCancelFuture;
+}
+```
+
+`cancel` has a default successful no-op implementation.
+
+## harness-tools
+
+```rust
+pub type ToolCancelFuture =
+    Pin<Box<dyn Future<Output = Result<(), PortableError>> + Send + 'static>>;
+
+pub trait ToolExecutor: Send + Sync {
+    fn provider_id(&self) -> &ProviderId;
+    fn idempotency_support(&self) -> IdempotencySupport;
+    fn invoke(&self, invocation: ToolInvocation) -> ToolExecutionFuture;
+    fn cancel(&self, invocation_id: InvocationId, cause: CancelCause) -> ToolCancelFuture;
+}
+```
+
+`cancel` has a default successful no-op implementation.
+
+## harness-provider-host
+
+```rust
+#[derive(Clone)]
+pub struct ProviderHostLlmAdapter { /* private */ }
+
+impl ProviderHostLlmAdapter {
+    pub async fn new(host: ProviderHost) -> Result<Self, ProviderAdapterError>;
+    pub fn host(&self) -> &ProviderHost;
+}
+
+impl LlmProvider for ProviderHostLlmAdapter { /* ... */ }
+```
+
+```rust
+#[derive(Clone)]
+pub struct ProviderHostToolAdapter { /* private */ }
+
+impl ProviderHostToolAdapter {
+    pub async fn new(
+        host: ProviderHost,
+        tool_name: impl Into<String>,
+    ) -> Result<Self, ProviderAdapterError>;
+
+    pub async fn from_definition(
+        host: ProviderHost,
+        definition: &ToolDefinition,
+    ) -> Result<Self, ProviderAdapterError>;
+
+    pub fn host(&self) -> &ProviderHost;
+    pub fn tool_name(&self) -> &str;
+    pub fn manifest_side_effect(&self) -> SideEffectClass;
+
+    pub fn validate_definition(
+        &self,
+        definition: &ToolDefinition,
+    ) -> Result<(), ProviderAdapterError>;
+}
+
+impl ToolExecutor for ProviderHostToolAdapter { /* ... */ }
+```
+
+```rust
+#[non_exhaustive]
+pub enum ProviderAdapterError {
+    ManifestUnavailable,
+    InvalidProviderId { value: String, message: String },
+    EmptyToolName,
+    ToolNotDeclared(String),
+    DefinitionMismatch {
+        tool: String,
+        field: &'static str,
+        core: String,
+        provider: String,
+    },
+}
+```
+
+## Agent cancellation bridge
+
+`AgentActor::handle_cancel` receives both LLM and Tool runtimes, captures the live capability cancellation target before durable mutation, commits Batch 09 cancellation/recovery events, then invokes the corresponding domain cancellation hook before aborting the local task.
+
+Agent-owned timeout paths invoke the same hooks with `CancelCause::Timeout`.
