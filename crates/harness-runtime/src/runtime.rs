@@ -39,33 +39,35 @@ pub struct HarnessRuntime {
     id_source: Arc<dyn RuntimeIdSource>,
 }
 
+pub(crate) struct HarnessRuntimeParts {
+    pub info: HarnessRuntimeInfo,
+    pub providers: ProviderRegistry,
+    pub llms: LlmRegistry,
+    pub profiles: ProfileRegistry,
+    pub session_store: Arc<dyn SessionStore>,
+    pub blob_store: Arc<dyn BlobStore>,
+    pub event_source: Arc<dyn AgentEventSource>,
+    pub id_source: Arc<dyn RuntimeIdSource>,
+}
+
 impl HarnessRuntime {
     pub fn builder() -> HarnessRuntimeBuilder {
         HarnessRuntimeBuilder::new()
     }
 
-    pub(crate) fn from_parts(
-        info: HarnessRuntimeInfo,
-        providers: ProviderRegistry,
-        llms: LlmRegistry,
-        profiles: ProfileRegistry,
-        session_store: Arc<dyn SessionStore>,
-        blob_store: Arc<dyn BlobStore>,
-        event_source: Arc<dyn AgentEventSource>,
-        id_source: Arc<dyn RuntimeIdSource>,
-    ) -> Self {
+    pub(crate) fn from_parts(parts: HarnessRuntimeParts) -> Self {
         Self {
-            info,
+            info: parts.info,
             state: RwLock::new(HarnessRuntimeState::Running),
             shutdown_lock: Mutex::new(()),
-            providers,
-            llms,
-            profiles,
+            providers: parts.providers,
+            llms: parts.llms,
+            profiles: parts.profiles,
             agents: AgentRegistry::new(),
-            session_store,
-            blob_store,
-            event_source,
-            id_source,
+            session_store: parts.session_store,
+            blob_store: parts.blob_store,
+            event_source: parts.event_source,
+            id_source: parts.id_source,
         }
     }
 

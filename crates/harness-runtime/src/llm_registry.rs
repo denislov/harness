@@ -43,7 +43,7 @@ impl LlmRegistry {
             let adapter = ProviderHostLlmAdapter::new(host).await.map_err(|source| {
                 HarnessRuntimeBuildError::LlmAdapter {
                     provider: provider_id.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?;
             let _ = entries.insert(

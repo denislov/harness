@@ -50,7 +50,10 @@ impl ProviderRegistry {
                 Ok(host) => host,
                 Err(source) => {
                     let _ = registry.shutdown_all().await;
-                    return Err(HarnessRuntimeBuildError::ProviderStart { expected, source });
+                    return Err(HarnessRuntimeBuildError::ProviderStart {
+                        expected,
+                        source: Box::new(source),
+                    });
                 }
             };
 

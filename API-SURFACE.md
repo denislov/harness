@@ -1704,3 +1704,54 @@ Provider membership and Profile membership are immutable after `build()` in Batc
 `RuntimeToolBinding` keeps `ToolDefinition` and `ToolArgumentValidator` Core-authoritative while binding execution to one provider manifest.
 
 `RuntimeIdSource` is intentionally injected; Batch 14 does not choose a UUID/ULID dependency for production identity generation.
+
+## Batch 15 — Durable Local Storage
+
+### `harness-storage-local`
+
+```rust
+pub struct SqliteSessionStore { /* ... */ }
+
+impl SqliteSessionStore {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionStoreError>;
+    pub fn path(&self) -> &Path;
+}
+
+impl SessionStore for SqliteSessionStore { /* existing trait surface */ }
+
+pub struct FilesystemBlobStore { /* ... */ }
+
+impl FilesystemBlobStore {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, BlobStoreError>;
+    pub fn root(&self) -> &Path;
+}
+
+impl BlobStore for FilesystemBlobStore { /* existing trait surface */ }
+
+pub struct DurableLocalStorage { /* ... */ }
+
+impl DurableLocalStorage {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, DurableLocalStorageError>;
+    pub fn root(&self) -> &Path;
+    pub fn session_store(&self) -> Arc<SqliteSessionStore>;
+    pub fn blob_store(&self) -> Arc<FilesystemBlobStore>;
+}
+
+pub enum DurableLocalStorageError { /* non_exhaustive */ }
+```
+
+### `harness-runtime`
+
+```rust
+impl HarnessRuntimeBuilder {
+    pub fn durable_local(
+        root: impl Into<PathBuf>,
+        event_source: Arc<dyn AgentEventSource>,
+        id_source: Arc<dyn RuntimeIdSource>,
+    ) -> Result<Self, HarnessRuntimeBuildError>;
+}
+```
+
+`HarnessRuntimeBuildError` keeps the same semantic variants but source-heavy build failures now store boxed sources. It also gains `DurableLocalStorage` for the convenience composition path.
+
+`HarnessRuntime::from_parts` remains crate-private and now receives one crate-private `HarnessRuntimeParts` value.

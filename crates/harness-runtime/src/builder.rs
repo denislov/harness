@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use harness_agent::AgentEventSource;
 use harness_session::SessionStore;
 use harness_storage::BlobStore;
-use harness_storage_local::{MemoryBlobStore, MemorySessionStore};
+use harness_storage_local::{DurableLocalStorage, MemoryBlobStore, MemorySessionStore};
 
 use crate::{
     AgentProfile, HarnessRuntime, HarnessRuntimeBuildError, HarnessRuntimeInfo, LlmRegistry,
     ProfileRegistry, ProviderProcessSpec, ProviderRegistry, RuntimeIdSource,
+    runtime::HarnessRuntimeParts,
 };
 
 pub struct HarnessRuntimeBuilder {
@@ -39,8 +40,7 @@ impl HarnessRuntimeBuilder {
         }
     }
 
-    /// Convenience composition for Batch 14 development/tests. Batch 15 will
-    /// add durable local storage; production callers should inject their stores.
+    /// Convenience composition for deterministic process-local development/tests.
     pub fn in_memory(
         event_source: Arc<dyn AgentEventSource>,
         id_source: Arc<dyn RuntimeIdSource>,
@@ -50,6 +50,25 @@ impl HarnessRuntimeBuilder {
             .blob_store(Arc::new(MemoryBlobStore::new()))
             .event_source(event_source)
             .id_source(id_source)
+    }
+
+    /// Opens the conventional Batch 15 durable local storage layout and wires
+    /// it into this builder. Provider/profile configuration remains explicit.
+    pub fn durable_local(
+        root: impl Into<PathBuf>,
+        event_source: Arc<dyn AgentEventSource>,
+        id_source: Arc<dyn RuntimeIdSource>,
+    ) -> Result<Self, HarnessRuntimeBuildError> {
+        let storage = DurableLocalStorage::open(root).map_err(|source| {
+            HarnessRuntimeBuildError::DurableLocalStorage {
+                source: Box::new(source),
+            }
+        })?;
+        Ok(Self::new()
+            .session_store(storage.session_store())
+            .blob_store(storage.blob_store())
+            .event_source(event_source)
+            .id_source(id_source))
     }
 
     pub fn runtime_info(mut self, info: HarnessRuntimeInfo) -> Self {
@@ -130,8 +149,8 @@ impl HarnessRuntimeBuilder {
             }
         };
 
-        Ok(HarnessRuntime::from_parts(
-            self.runtime_info,
+        Ok(HarnessRuntime::from_parts(HarnessRuntimeParts {
+            info: self.runtime_info,
             providers,
             llms,
             profiles,
@@ -139,6 +158,6 @@ impl HarnessRuntimeBuilder {
             blob_store,
             event_source,
             id_source,
-        ))
+        }))
     }
 }

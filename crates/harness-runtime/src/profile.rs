@@ -221,12 +221,12 @@ async fn compile_profile(
     let llm_runtime = AgentLlmRuntime::new(request_config, llm_provider, blob_store)
         .map_err(|source| HarnessRuntimeBuildError::LlmRuntime {
             profile: profile_name.to_owned(),
-            source,
+            source: Box::new(source),
         })?
         .with_timeout_ms(profile.model.timeout_ms)
         .map_err(|source| HarnessRuntimeBuildError::LlmRuntime {
             profile: profile_name.to_owned(),
-            source,
+            source: Box::new(source),
         })?;
 
     let mut registrations = Vec::with_capacity(profile.tools.len());
@@ -243,13 +243,13 @@ async fn compile_profile(
             .map_err(|source| HarnessRuntimeBuildError::ToolAdapter {
                 profile: profile_name.to_owned(),
                 tool: tool_name,
-                source,
+                source: Box::new(source),
             })?;
         let executor: Arc<dyn ToolExecutor> = Arc::new(adapter);
         let registration = ToolRegistration::new(binding.definition, executor, binding.validator)
             .map_err(|source| HarnessRuntimeBuildError::ToolRegistry {
             profile: profile_name.to_owned(),
-            source,
+            source: Box::new(source),
         })?;
         registrations.push(registration);
     }
@@ -257,7 +257,7 @@ async fn compile_profile(
     let tool_registry = ToolRegistry::new(registrations).map_err(|source| {
         HarnessRuntimeBuildError::ToolRegistry {
             profile: profile_name.to_owned(),
-            source,
+            source: Box::new(source),
         }
     })?;
     let tool_runtime = AgentToolRuntime::new(
@@ -267,7 +267,7 @@ async fn compile_profile(
     )
     .map_err(|source| HarnessRuntimeBuildError::ToolRuntime {
         profile: profile_name.to_owned(),
-        source,
+        source: Box::new(source),
     })?;
 
     Ok(CompiledAgentProfile {

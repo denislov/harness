@@ -19,3 +19,4 @@ tokio = { version = "1", features = ["sync", "rt", "time", "process", "io-util"]
 futures-core = "0.3"
 futures-util = "0.3"
 sha2 = "0.10"
+rusqlite = { version = "=0.39.0", features = ["bundled"] }

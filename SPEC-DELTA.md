@@ -1020,3 +1020,14 @@ Normative refinements:
 13. Dynamic provider/profile mutation and provider restart policy remain deferred.
 
 See `spec/batch-14-runtime-composition.md` for the complete contract.
+
+## Batch 15 — Durable Local Storage
+
+- Add `SqliteSessionStore` as the first durable implementation of the existing Session event-log contract.
+- SQLite schema v1 stores canonical committed event JSON plus indexed Session/sequence/EventId columns and validates both representations on read.
+- Mutations use IMMEDIATE transactions; append preserves conflict-before-batch-validation ordering and commits the complete batch/head atomically.
+- Add `FilesystemBlobStore`, content-addressed by SHA-256, with temporary-file + fsync + atomic hard-link publish and BlobRef integrity verification.
+- Add `DurableLocalStorage` conventional layout and `HarnessRuntimeBuilder::durable_local` composition helper.
+- Add Runtime restart acceptance: previous Session projection and model-request BlobRefs survive store/Runtime reopen and a subsequent Turn executes normally.
+- Fix Batch 14 `result_large_err` by boxing build-error sources and `too_many_arguments` by introducing crate-private `HarnessRuntimeParts`; no lint suppression is added.
+- Provider Protocol, SessionEvent schema, Agent state machine, Tool recovery semantics, and Python SDK conformance remain unchanged.

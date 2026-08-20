@@ -1,6 +1,7 @@
 use harness_agent::{AgentLlmRuntimeError, AgentSpawnError, AgentToolRuntimeError};
 use harness_provider_host::{ProviderAdapterError, ProviderHostError};
 use harness_session::SessionStoreError;
+use harness_storage_local::DurableLocalStorageError;
 use harness_tools::ToolRegistryError;
 use harness_types::{ProviderId, SessionId};
 use thiserror::Error;
@@ -34,11 +35,17 @@ pub enum HarnessRuntimeBuildError {
     #[error("Agent profile {0} is configured more than once")]
     DuplicateProfile(String),
 
+    #[error("failed to open durable local storage: {source}")]
+    DurableLocalStorage {
+        #[source]
+        source: Box<DurableLocalStorageError>,
+    },
+
     #[error("failed to start configured provider {expected}: {source}")]
     ProviderStart {
         expected: ProviderId,
         #[source]
-        source: ProviderHostError,
+        source: Box<ProviderHostError>,
     },
 
     #[error("provider {0} completed initialization without a manifest")]
@@ -57,7 +64,7 @@ pub enum HarnessRuntimeBuildError {
     LlmAdapter {
         provider: ProviderId,
         #[source]
-        source: ProviderAdapterError,
+        source: Box<ProviderAdapterError>,
     },
 
     #[error("Agent profile {profile} references unavailable provider {provider}")]
@@ -83,28 +90,28 @@ pub enum HarnessRuntimeBuildError {
         profile: String,
         tool: String,
         #[source]
-        source: ProviderAdapterError,
+        source: Box<ProviderAdapterError>,
     },
 
     #[error("Agent profile {profile} has an invalid Tool registry: {source}")]
     ToolRegistry {
         profile: String,
         #[source]
-        source: ToolRegistryError,
+        source: Box<ToolRegistryError>,
     },
 
     #[error("Agent profile {profile} has an invalid LLM runtime: {source}")]
     LlmRuntime {
         profile: String,
         #[source]
-        source: AgentLlmRuntimeError,
+        source: Box<AgentLlmRuntimeError>,
     },
 
     #[error("Agent profile {profile} has an invalid Tool runtime: {source}")]
     ToolRuntime {
         profile: String,
         #[source]
-        source: AgentToolRuntimeError,
+        source: Box<AgentToolRuntimeError>,
     },
 }
 
