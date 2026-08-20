@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -15,7 +15,6 @@ use harness_runtime::{
     RuntimeIdSource, RuntimeToolBinding,
 };
 use harness_session::{SessionEventPayload, SessionStore};
-use harness_storage::BlobStore;
 use harness_tools::{
     AllowAllToolPolicy, ToolArgumentValidationError, ToolArgumentValidator, ToolDefinition,
 };
@@ -150,9 +149,9 @@ fn provider_spec(provider_id: &ProviderId) -> ProviderProcessSpec {
         .shutdown_timeout(Duration::from_secs(2))
 }
 
-async fn build_runtime(root: &PathBuf, identity: Arc<TestIdentitySource>) -> HarnessRuntime {
+async fn build_runtime(root: &Path, identity: Arc<TestIdentitySource>) -> HarnessRuntime {
     let provider_id = ProviderId::new("example-python").unwrap();
-    HarnessRuntimeBuilder::durable_local(root.clone(), identity.clone(), identity)
+    HarnessRuntimeBuilder::durable_local(root.to_path_buf(), identity.clone(), identity)
         .unwrap()
         .provider(provider_spec(&provider_id))
         .profile("python-agent", profile(&provider_id))
