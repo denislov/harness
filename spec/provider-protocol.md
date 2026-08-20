@@ -1,42 +1,64 @@
 # Provider Protocol v1
 
-**Status:** Draft protocol 1.0
+**Status:** Normative v1 wire contract  
+**Protocol version:** `1.0`
 
 ## 1. Purpose
 
-Provider Protocol allows language-neutral out-of-process providers to supply Tool and LLM capabilities to Rust Harness Core without sharing a native ABI.
+Provider Protocol is the language-neutral process boundary between Harness Core and out-of-process capability providers.
 
-v1 transport is local stdio. Protocol semantics are designed so that other transports may be added later without changing the domain contracts.
+The v1 contract covers:
+
+- provider initialization and manifest negotiation;
+- Tool invocation;
+- LLM stream startup and event delivery;
+- cooperative cancellation;
+- health ping;
+- graceful shutdown;
+- process/protocol failure semantics.
+
+Rust domain crates are not part of the wire contract. A provider implementation MUST be able to implement this document without linking Rust code.
 
 ## 2. Transport
 
-Provider Host spawns a provider process and communicates using:
+v1 uses:
 
 ```text
 JSON-RPC 2.0
-NDJSON framing
-stdin/stdout
 UTF-8
+NDJSON framing
+Core -> provider stdin
+provider -> Core stdout
+provider diagnostics -> stderr
 ```
 
-Each line on stdin or stdout is one complete JSON-RPC message.
+Each stdin/stdout physical line is exactly one complete JSON-RPC message.
 
-Provider stdout MUST contain only protocol messages. Provider diagnostics and logs MUST be written to stderr.
+Provider stdout MUST contain protocol messages only. Logs, stack traces, debug prints, progress bars, and diagnostics MUST go to stderr.
 
-Malformed stdout is a protocol violation.
+An empty frame, invalid UTF-8, invalid JSON, or non-protocol stdout line is a protocol violation.
 
-## 3. JSON conventions
+## 3. JSON-RPC profile
 
-- JSON object fields use lower camel case.
-- Unknown optional fields SHOULD be ignored for forward compatibility.
-- Unknown required method names receive the normal JSON-RPC method-not-found response.
-- Stable string enums use lowercase and hyphenated tokens.
-- Identifier fields are opaque strings.
-- Sequence/counter fields are non-negative safe JSON integers.
+Provider Protocol v1 intentionally narrows JSON-RPC 2.0:
 
-## 4. Lifecycle state
+- `jsonrpc` MUST equal `"2.0"`;
+- request/response `id` MUST be a non-empty JSON string;
+- Core allocates request ids;
+- Provider MUST echo the exact request id in its response;
+- Provider-to-Core JSON-RPC requests are not supported in v1;
+- Provider-to-Core notifications are limited to negotiated protocol notifications such as `llm.event`;
+- a response MUST contain exactly one of `result` or `error`;
+- object fields use lower camel case;
+- stable enum tokens use lowercase kebab case unless explicitly specified otherwise;
+- portable Harness error codes use `SCREAMING_SNAKE_CASE`;
+- opaque identifiers have no parseable semantics.
 
-ProviderHost models at least:
+Unknown optional object fields SHOULD be ignored for forward compatibility. Unknown required methods or unsupported required semantics MUST fail loudly.
+
+## 4. Process lifecycle
+
+ProviderHost exposes the process-local states:
 
 ```text
 starting
@@ -46,65 +68,51 @@ stopping
 stopped
 ```
 
-Only `ready` providers may receive new capability operations.
+Only `ready` providers receive new Tool or LLM operations.
+
+`unhealthy` means the process or protocol transport can no longer be trusted for new work. It does not imply that an already-dispatched external side effect did not occur.
 
 ## 5. Initialization
 
-Core sends:
+Immediately after spawn, Core sends:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "rpc_1",
-  "method": "provider.initialize",
-  "params": {
-    "protocolVersion": "1.0",
-    "runtime": {
-      "name": "harness",
-      "version": "0.1.0"
-    }
-  }
-}
+{"jsonrpc":"2.0","id":"rpc_1","method":"provider.initialize","params":{"protocolVersion":"1.0","runtime":{"name":"harness","version":"0.1.0"}}}
 ```
 
-Provider returns:
+Provider returns a manifest as the JSON-RPC result:
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": "rpc_1",
   "result": {
-    "providerId": "python-ai",
-    "providerVersion": "1.2.0",
+    "providerId": "example-python",
+    "providerVersion": "1.0.0",
     "protocolVersion": "1.0",
     "capabilities": []
   }
 }
 ```
 
-Provider MUST NOT be considered Ready before initialization succeeds and the returned manifest validates.
+A provider is not `ready` until the manifest validates.
 
-## 6. ProviderManifest
+### 5.1 Version rule
 
-Conceptual shape:
+Batch 10 implements strict protocol `1.0` equality. Major/minor negotiation is intentionally deferred until there is a second protocol revision to negotiate against.
+
+## 6. Provider manifest
+
+Manifest fields:
 
 ```text
-providerId
-providerVersion
-protocolVersion
+providerId        non-empty opaque string
+providerVersion   non-empty provider-defined version string
+protocolVersion   exactly "1.0"
 capabilities[]
 ```
 
-v1 capability kinds:
-
-```text
-tool
-llm
-```
-
-### 6.1 Tool capability descriptor
-
-Example:
+### 6.1 Tool descriptor
 
 ```json
 {
@@ -117,25 +125,54 @@ Example:
 }
 ```
 
-Tool schemas and descriptions MAY be supplied by Core composition or provider manifest according to deployment architecture, but the resolved definition in Core is authoritative before model exposure.
+`sideEffect` is one of:
 
-### 6.2 LLM capability descriptor
-
-Example:
-
-```json
-{
-  "kind": "llm",
-  "provider": "provider-a",
-  "models": ["model-x", "model-y"]
-}
+```text
+read-only
+idempotent-write
+non-idempotent-write
 ```
 
-A provider MAY expose dynamic model availability; exact discovery policy beyond the manifest is deferred.
+Provider metadata is capability discovery metadata. Core's resolved `ToolDefinition` remains authoritative before model exposure and dispatch.
 
-## 7. Tool invocation
+A Tool descriptor with `sideEffect: "idempotent-write"` MUST set `supportsIdempotencyKey: true`. A Host MUST reject a manifest that claims an idempotent write without keyed-idempotency support.
 
-Core request:
+Before dispatch, Host MUST verify that the requested Tool name or LLM model is declared by the initialized manifest. For LLM calls, `request.provider` MUST also equal the manifest `providerId`.
+
+### 6.2 LLM descriptor
+
+```json
+{"kind":"llm","models":["model-x","model-y"]}
+```
+
+Model names MUST be non-empty and unique within one manifest.
+
+## 7. Common wire vocabulary
+
+Provider Protocol defines its own wire schemas for messages, content blocks, blob references, portable errors, cancellation causes, and usage. These schemas intentionally mirror the provider-neutral domain vocabulary but are not Rust types.
+
+### 7.1 Content blocks
+
+Supported v1 `type` values:
+
+```text
+text
+reasoning
+image
+tool-call
+tool-result
+blob
+```
+
+`argumentsJson` is a JSON string containing one complete JSON value. It is not an embedded JSON object and MUST NOT be normalized or reserialized by transport code. Blob references use a non-empty opaque id and a 64-character lowercase hexadecimal SHA-256 digest.
+
+### 7.2 Portable error code
+
+Portable error `code` uses the stable `SCREAMING_SNAKE_CASE` vocabulary already defined by Harness Core, including `CANCELLED`, `DEADLINE_EXCEEDED`, `PROVIDER_UNAVAILABLE`, and `PROVIDER_PROTOCOL_ERROR`.
+
+## 8. Tool invocation
+
+Core sends one request per provider attempt:
 
 ```json
 {
@@ -146,16 +183,37 @@ Core request:
     "operationId": "inv_123",
     "invocationId": "inv_123",
     "callId": "call_abc",
+    "sessionId": "ses_123",
     "tool": "read_file",
     "argumentsJson": "{\"path\":\"README.md\"}",
     "attempt": 1,
     "idempotencyKey": "idem_xyz",
-    "deadline": "2026-08-19T13:00:30Z"
+    "deadline": "2026-08-20T03:00:00Z"
   }
 }
 ```
 
-Successful protocol response:
+v1 requires:
+
+```text
+operationId == invocationId
+attempt >= 1
+argumentsJson parses as exactly one JSON value
+```
+
+`deadline` is optional. When supplied it is an RFC3339 UTC deadline owned by Core.
+
+### 8.1 Tool result
+
+Provider may return only authoritative provider-level outcomes:
+
+```text
+success
+error
+cancelled
+```
+
+Example:
 
 ```json
 {
@@ -164,27 +222,25 @@ Successful protocol response:
   "result": {
     "outcome": {
       "kind": "success",
-      "content": [
-        {"type": "text", "text": "..."}
-      ]
+      "content": [{"type":"text","text":"..."}]
     }
   }
 }
 ```
 
-Provider-level Tool outcomes may include:
+Provider MUST NOT return Core policy outcome `denied` or crash-analysis outcome `unknown` as ordinary successful protocol results. Those states are derived by Core.
 
-```text
-success
-error
-cancelled
-```
+A JSON-RPC transport error is not a Tool terminal outcome. Core interprets transport ambiguity using the durable `tool/dispatched` boundary and `SideEffectClass`.
 
-`denied` is normally owned by Core policy before dispatch. `unknown` is normally derived by Core from uncertain transport/crash boundaries rather than claimed by a normal provider response.
+## 9. LLM startup
 
-## 8. LLM start
+### 9.1 Core-owned stream id
 
-Core request:
+Provider Protocol v1 finalizes one change from the earlier draft: **Core allocates `streamId` before sending `llm.start`.**
+
+This removes the race in which a Provider could emit the first `llm.event` after accepting the request but before Host had registered the Provider-allocated stream id.
+
+Core first installs local routing for `streamId`, then sends:
 
 ```json
 {
@@ -193,6 +249,7 @@ Core request:
   "method": "llm.start",
   "params": {
     "operationId": "req_123",
+    "streamId": "str_9",
     "request": {
       "requestId": "req_123",
       "sessionId": "ses_123",
@@ -202,34 +259,42 @@ Core request:
       "tools": [],
       "options": {}
     },
-    "deadline": "2026-08-19T13:05:00Z"
+    "deadline": "2026-08-20T03:05:00Z"
   }
 }
 ```
 
-Provider responds immediately after accepting the stream:
+v1 requires:
+
+```text
+operationId == request.requestId
+```
+
+Provider accepts by echoing the Core stream id:
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": "rpc_50",
   "result": {
-    "streamId": "str_123",
-    "accepted": true
+    "accepted": true,
+    "streamId": "str_9"
   }
 }
 ```
 
-The accepted stream then emits notifications.
+If `accepted=false`, `reason` MAY be included. Provider MUST NOT emit stream events for a rejected stream.
 
-## 9. LLM stream notification
+## 10. LLM event notification
+
+Provider emits:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "llm.event",
   "params": {
-    "streamId": "str_123",
+    "streamId": "str_9",
     "seq": 1,
     "event": {
       "type": "text-delta",
@@ -240,11 +305,40 @@ The accepted stream then emits notifications.
 }
 ```
 
-The final notification contains a `finish` event. No further event may use that streamId after finish.
+For each stream:
 
-## 10. Cancellation
+- `seq` starts at 1;
+- every event increments by exactly 1;
+- `finish` occurs exactly once;
+- no event follows `finish`;
+- an unknown `streamId` is a protocol violation.
 
-Core sends a notification or request:
+Supported event types:
+
+```text
+block-start
+text-delta
+reasoning-delta
+tool-call-delta
+block-end
+usage
+finish
+```
+
+A `finish` reason is one of:
+
+```text
+completed
+max-tokens
+error
+cancelled
+```
+
+`completed` and `max-tokens` carry no failure. `error` carries a failure. `cancelled` carries a `CANCELLED` failure.
+
+## 11. Cancellation
+
+Core sends a notification:
 
 ```json
 {
@@ -252,79 +346,83 @@ Core sends a notification or request:
   "method": "capability.cancel",
   "params": {
     "operationId": "inv_123",
-    "cause": {
-      "kind": "user"
-    }
+    "cause": {"kind":"user"}
   }
 }
 ```
 
-For Tools, `operationId` is the InvocationId. For LLM calls, it is the RequestId.
+Tool `operationId` is the InvocationId. LLM `operationId` is the RequestId.
 
-Cancellation is cooperative but provider implementations MUST make a best effort to abort external I/O and stop producing stream events promptly.
+Cancellation is cooperative. It is never proof that an already-dispatched side effect did not occur. Durable Agent cancellation/recovery semantics remain owned by Core.
 
-## 11. Ping
+## 12. Ping
 
-Core MAY send:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "rpc_ping_1",
-  "method": "provider.ping",
-  "params": {}
-}
-```
-
-Provider responds successfully if its protocol loop is healthy.
-
-Ping success does not prove downstream capability health.
-
-## 12. Shutdown
-
-Core requests graceful shutdown:
+Core request:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "rpc_shutdown_1",
-  "method": "provider.shutdown",
-  "params": {}
-}
+{"jsonrpc":"2.0","id":"rpc_70","method":"provider.ping","params":{}}
 ```
 
-After acknowledgement, provider should stop accepting operations, cancel/drain owned operations according to implementation policy, and exit.
+Provider result:
 
-ProviderHost MAY forcibly terminate a provider that exceeds deployment shutdown limits.
+```json
+{"jsonrpc":"2.0","id":"rpc_70","result":{"ok":true}}
+```
 
-## 13. Provider process failure
+Ping checks the provider protocol loop, not downstream service health.
 
-Unexpected process exit fails all active operations associated with that process as `PROVIDER_UNAVAILABLE` at the transport boundary.
+## 13. Shutdown
 
-ProviderHost MUST NOT automatically replay side-effecting operations. The owning Core subsystem interprets the failure.
+Core requests:
 
-## 14. Protocol errors
+```json
+{"jsonrpc":"2.0","id":"rpc_80","method":"provider.shutdown","params":{}}
+```
 
-Examples of protocol violations:
+Provider returns:
 
-- non-JSON bytes on stdout;
-- duplicate or decreasing LLM stream sequence number;
-- event after `finish`;
-- unknown streamId;
-- malformed ContentBlock;
-- response id that cannot be correlated to an active request;
+```json
+{"jsonrpc":"2.0","id":"rpc_80","result":{"accepted":true}}
+```
+
+Host then closes provider stdin and waits for process exit. Deployment policy may forcibly terminate a provider that exceeds the shutdown timeout.
+
+## 14. Failure semantics
+
+Unexpected process exit or stdout transport failure:
+
+- marks the provider unavailable/unhealthy;
+- fails active JSON-RPC requests at the transport boundary;
+- fails active LLM stream routes;
+- MUST NOT automatically replay Tool side effects.
+
+The Agent/Tool recovery layer remains responsible for deciding whether a durable dispatch may be retried.
+
+## 15. Protocol violations
+
+Examples include:
+
+- non-JSON stdout;
+- invalid JSON-RPC version;
+- non-string or empty response id;
+- response id not correlated to an active or recently timed-out request;
+- provider-to-Core request in v1;
+- unsupported provider notification;
 - invalid manifest;
-- Tool result that does not satisfy required protocol structure.
+- invalid Tool result structure;
+- unknown LLM stream id;
+- non-contiguous LLM stream sequence;
+- malformed stream event;
+- event after finish.
 
-Protocol violations produce `PROVIDER_PROTOCOL_ERROR` for affected operations and MAY mark the provider Unhealthy.
+A Host MAY mark the entire Provider process unhealthy after a protocol violation. Batch 10's reference Host does so.
 
-## 15. Versioning
+## 16. Request timeout and late response
 
-v1 protocol version is `1.0`.
+A Host request timeout retires the JSON-RPC request id. A later response using that retired id is ignored as a late response rather than misclassified as a new protocol violation.
 
-Compatibility policy:
+Retired-id memory is implementation bounded. Once an id ages out of that bounded memory, a still-later response may be treated as an uncorrelated response.
 
-- different major version: incompatible;
-- same major with compatible minor revision: feature/capability negotiation may allow operation;
-- implementations SHOULD ignore unknown optional fields;
-- implementations MUST fail loudly when a required semantic capability is unsupported.
+## 17. Forward compatibility
+
+Protocol `1.0` freezes the semantics in this document. Future compatibility rules will be introduced with an actual subsequent protocol revision rather than speculative negotiation code.

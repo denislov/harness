@@ -991,3 +991,59 @@ The existing main v0.1 spec files are intentionally not rewritten again in this 
 ## Validation note
 
 The generation environment used for this package does not contain a Rust toolchain, and its container network cannot install one. The package was checked for Python/apply-script syntax, shell syntax, TOML parsing, Rust delimiter structure, patch-anchor uniqueness, and package integrity, but the authoritative Rust compile/test/clippy result is your local acceptance run above.
+
+# Harness API Batch 10
+
+**Baseline:** `denislov/harness` main commit `5a53cf2c603cfec270de225f715deafa2a106395`
+
+## Scope
+
+Batch 10 turns the draft Provider Protocol into executable wire/transport code without coupling it to Rust domain crates.
+
+It adds:
+
+- `harness-provider-protocol` v1 typed wire schemas;
+- strict JSON-RPC 2.0 + UTF-8 NDJSON codec;
+- Provider manifest validation;
+- Tool invoke wire contract;
+- LLM start/event wire contract;
+- Core-allocated `streamId`;
+- cooperative `capability.cancel` notification;
+- `harness-provider-host` subprocess lifecycle and request correlation;
+- Tokio workspace features `process` and `io-util` for subprocess/NDJSON I/O;
+- LLM stream demultiplexing with strict sequence validation;
+- late-response retirement for timed-out RPC ids;
+- bounded stderr history;
+- dependency-free Python reference provider;
+- process-level `conformance/provider_protocol_v1_smoke.py`;
+- finalized `spec/provider-protocol.md` and Batch 10 normative amendment.
+
+## Deliberate non-goal
+
+Batch 10 does **not** implement `harness_llm::LlmProvider` or `harness_tools::ToolExecutor` for `ProviderHost`. Those adapters belong to Batch 11. The protocol crate therefore has no dependency on Harness domain crates.
+
+## Apply
+
+```bash
+./apply.sh /path/to/harness
+```
+
+The script verifies Git blob hashes for every existing file it changes before writing anything. New Batch 10 paths must not already exist.
+
+## Validate
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Also run the process-level provider conformance smoke test:
+
+```bash
+python3 -m py_compile providers/example-python/provider.py
+python3 conformance/provider_protocol_v1_smoke.py
+```
+
+The provider itself has no third-party Python dependencies.

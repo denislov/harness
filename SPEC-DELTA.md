@@ -895,3 +895,54 @@ The v0.1 sequential Tool scheduler permits at most one pending approval and does
 ## D-10 — Main spec consolidation deferred
 
 Batch 09 adds `spec/batch-09-control-and-approval.md` as a normative amendment rather than rewriting the existing main spec set. The amendment should be folded into the v0.1 consolidated specs before the Provider Protocol implementation is frozen.
+
+# Batch 10 Spec Delta
+
+## D-10.1 — Provider Protocol becomes executable and normative
+
+The previous `spec/provider-protocol.md` was a draft. Batch 10 replaces it with the implemented v1 wire contract.
+
+## D-10.2 — Wire crate remains domain-independent
+
+`harness-provider-protocol` may depend on serialization/error libraries, but not on Harness domain/runtime crates. Equivalent wire vocabulary is defined locally.
+
+## D-10.3 — JSON-RPC id profile
+
+v1 accepts non-empty string ids only. Core allocates request ids and Provider echoes them exactly.
+
+## D-10.4 — Core allocates LLM stream ids
+
+The earlier draft allowed Provider to allocate `streamId` in the `llm.start` response. Batch 10 changes this: Host allocates and installs routing before the request, Provider echoes the id. This removes a start/event routing race.
+
+## D-10.5 — Provider Tool outcomes are narrower than Core Tool outcomes
+
+Provider may return `success`, `error`, or `cancelled`. `denied` remains Core policy output. `unknown` remains Core recovery analysis after an uncertain durable dispatch.
+
+## D-10.6 — Late timed-out RPC response
+
+A request timeout retires its RpcId in a bounded Host cache. A late response for a retained retired id is ignored instead of marking the provider unhealthy.
+
+## D-10.7 — Protocol violation scope
+
+The Batch 10 reference Host marks the Provider process `Unhealthy` on malformed stdout, uncorrelated non-retired response ids, provider-to-Core requests, unsupported notifications, unknown LLM streams, or invalid/non-contiguous LLM stream events.
+
+## D-10.8 — Transport failure does not imply rollback
+
+Provider process failure only reports transport unavailability. It does not authorize replay of side-effecting Tool work. Agent/Tool recovery continues to own replay decisions.
+
+## D-10.9 — Domain adapters deferred
+
+`ProviderHost -> harness_llm::LlmProvider` and `ProviderHost -> harness_tools::ToolExecutor` are explicitly Batch 11 work. Batch 10 validates the process/wire seam in isolation.
+
+
+## D-10.10 — Wire semantic validation
+
+The protocol layer validates opaque-id non-emptiness where structurally required, `argumentsJson`, SHA-256 blob digests, safe JSON integer bounds for wire sizes/counters, portable error shape, and RFC3339 UTC deadlines. Malformed provider results/events are protocol faults rather than domain-adapter inputs.
+
+## D-10.11 — Process-level conformance smoke
+
+A dependency-free Python conformance runner launches the reference provider through real pipes and validates the Batch 10 handshake/Tool/LLM/shutdown path independently from Rust domain adapters.
+
+## D-10.12 — Manifest is an executable capability fence
+
+The initialized manifest is not informational only. Host refuses undeclared Tool names and LLM models before sending a capability request, requires LLM provider identity to match the manifest provider id, and rejects `idempotent-write` Tool descriptors without keyed-idempotency support.

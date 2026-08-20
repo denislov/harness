@@ -1384,3 +1384,148 @@ spawn_llm_operation(..., timeout_ms, ...)
 spawn_tool_operation(..., timeout_ms, ...)
 stale LLM/Tool completion filtering
 ```
+
+# Batch 10 API Surface
+
+## `harness-provider-protocol`
+
+### Constants
+
+```rust
+JSONRPC_VERSION: &str = "2.0"
+PROTOCOL_VERSION: &str = "1.0"
+MAX_JSON_SAFE_INTEGER: u64
+
+METHOD_PROVIDER_INITIALIZE
+METHOD_PROVIDER_PING
+METHOD_PROVIDER_SHUTDOWN
+METHOD_TOOL_INVOKE
+METHOD_LLM_START
+METHOD_LLM_EVENT
+METHOD_CAPABILITY_CANCEL
+```
+
+### JSON-RPC / NDJSON
+
+```rust
+RpcId
+RpcRequest<P>
+RpcNotification<P>
+RpcSuccessResponse<R>
+RpcErrorResponse
+RpcErrorObject
+InboundMessage
+RpcResponseEnvelope
+RpcResponseOutcome
+RpcNotificationEnvelope
+RpcRequestEnvelope
+
+encode_ndjson(...)
+decode_inbound_line(...)
+```
+
+Protocol v1 narrows JSON-RPC ids to non-empty strings.
+
+### Manifest
+
+```rust
+ProviderManifest
+CapabilityDescriptor::{Tool, Llm}
+WireSideEffectClass
+ManifestValidationError
+```
+
+### Common wire vocabulary
+
+```rust
+WireRole
+WireMessageSource
+WireMessage
+WireContentBlock
+WireBlobRef
+WireErrorCode
+WirePortableError
+WireTokenUsage
+WireCancelCause
+WireCancelCauseKind
+CommonWireValidationError
+```
+
+`WireBlobRef`, `WireContentBlock`, `WireMessage`, `WirePortableError`, and `WireTokenUsage` expose semantic `validate()` methods. Numeric wire counters/sizes that use `u64` are restricted to the maximum safe JSON integer where applicable.
+
+### Tool
+
+```rust
+ToolInvokeParams
+ToolInvokeResult
+ProviderToolOutcome::{Success, Error, Cancelled}
+ToolInvokeValidationError
+```
+
+`ToolInvokeParams::validate()` checks ids, JSON arguments, attempt number, and UTC RFC3339 deadline. `ToolInvokeResult::validate()` checks provider outcome content before Host accepts it.
+
+Provider outcomes deliberately exclude Core-derived `Denied` and `Unknown`.
+
+### LLM
+
+```rust
+WireModelOptions
+WireModelToolSpec
+WireModelRequest
+LlmStartParams
+LlmStartResult
+LlmEventParams
+WireBlockType
+WireFinishReason
+WireLlmStreamEvent
+LlmWireValidationError
+```
+
+`LlmStartParams.stream_id` is Core allocated. The Provider must echo it in `LlmStartResult`. LLM request messages, block-end content, usage counters, failure payloads, stream sequence, and UTC RFC3339 deadline are validated at the wire boundary.
+
+## `harness-provider-host`
+
+```rust
+ProviderState {
+    Starting,
+    Ready,
+    Unhealthy,
+    Stopping,
+    Stopped,
+}
+
+ProviderHostConfig
+ProviderHost
+ProviderHostError
+ProviderStreamError
+LlmStreamItem
+LlmStreamHandle
+```
+
+Principal methods:
+
+```rust
+ProviderHost::start(config).await
+host.state().await
+host.manifest().await
+host.recent_stderr().await
+host.ping().await
+host.invoke_tool(params).await
+host.start_llm(operation_id, request, deadline).await
+host.cancel(operation_id, cause).await
+host.shutdown().await
+
+stream.recv().await
+```
+
+The Host is a transport multiplexer, not yet a Harness LLM/Tool domain adapter. Before `tool.invoke` or `llm.start`, it checks the initialized manifest for the requested capability. LLM requests must also use the manifest provider id. Manifest validation rejects `idempotent-write` Tool descriptors that do not advertise keyed idempotency support.
+
+
+## Conformance
+
+```text
+conformance/provider_protocol_v1_smoke.py
+providers/example-python/provider.py
+```
+
+The smoke test launches the reference provider over real stdin/stdout pipes and verifies initialization, Tool RPC, Core-owned LLM stream routing, ordered events, and shutdown.
