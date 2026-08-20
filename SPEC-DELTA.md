@@ -998,3 +998,25 @@ Normative decisions:
 7. Future language SDKs MUST run the same golden fixtures; implementation differences do not justify per-language expected-output forks.
 
 See `spec/batch-13-provider-sdk-conformance.md`.
+
+## Batch 14 — Harness Runtime Composition Root
+
+Batch 14 establishes the process-level composition boundary that had remained intentionally empty since the original Rust workspace scaffold.
+
+Normative refinements:
+
+1. `harness-runtime` owns composition and process lifecycle, not Agent Turn/Step decisions.
+2. Provider and Profile membership is frozen at successful Runtime build in Batch 14.
+3. Configured provider identity must exactly match manifest `providerId`.
+4. Runtime build is transactional from the caller's perspective: any failure after provider startup triggers best-effort rollback before returning.
+5. `LlmRegistry` is manifest-derived and rejects profile model bindings that the selected provider does not declare.
+6. Core `ToolDefinition` remains authoritative; provider manifest metadata is compatibility attestation.
+7. `AgentRegistry` reserves `SessionId` before asynchronous spawn and enforces one live/transitioning Agent per Session.
+8. Runtime lifecycle states are process-local and never become SessionEvents.
+9. The lifecycle gate lets in-progress open/close/create operations finish before shutdown enters `ShuttingDown`.
+10. Normal shutdown order is Agents first, Providers second.
+11. Shutdown continues through later phases after individual failures and reports aggregated failures.
+12. Storage and identity generation remain injected seams. In-memory storage is a Batch 14 convenience, not a durability claim.
+13. Dynamic provider/profile mutation and provider restart policy remain deferred.
+
+See `spec/batch-14-runtime-composition.md` for the complete contract.

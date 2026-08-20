@@ -1653,3 +1653,54 @@ conformance/providers/python_sdk_v1.py
 The generic runner treats a provider as an opaque subprocess and compares parsed JSON frames using exact structural equality. Each fixture gets a fresh process plus automatic initialize/manifest verification and graceful shutdown verification.
 
 The canonical conformance manifest and behavior are normative test data. Future Provider SDKs implement the same conformance provider and run the same fixtures rather than maintaining language-specific expected outputs.
+
+## Batch 14 — Harness Runtime Composition Root
+
+### `harness-runtime`
+
+New public composition surface:
+
+```rust
+HarnessRuntime
+HarnessRuntimeBuilder
+HarnessRuntimeState
+HarnessRuntimeInfo
+HarnessRuntimeBuildError
+HarnessRuntimeError
+
+ProviderProcessSpec
+ProviderRegistry
+LlmRegistry
+
+AgentProfile
+ModelBinding
+RuntimeToolBinding
+ProfileRegistry
+
+AgentRegistry
+RuntimeIdSource
+```
+
+Primary lifecycle API:
+
+```rust
+HarnessRuntime::builder()
+HarnessRuntimeBuilder::in_memory(event_source, id_source)
+HarnessRuntimeBuilder::provider(...)
+HarnessRuntimeBuilder::profile(...)
+HarnessRuntimeBuilder::build().await
+
+HarnessRuntime::create_session().await
+HarnessRuntime::create_session_with_data(...).await
+HarnessRuntime::create_session_with_id(...).await
+HarnessRuntime::open_agent(session_id, profile_name).await
+HarnessRuntime::agent_handle(&session_id).await
+HarnessRuntime::close_agent(&session_id).await
+HarnessRuntime::shutdown().await
+```
+
+Provider membership and Profile membership are immutable after `build()` in Batch 14. Agent membership is dynamic.
+
+`RuntimeToolBinding` keeps `ToolDefinition` and `ToolArgumentValidator` Core-authoritative while binding execution to one provider manifest.
+
+`RuntimeIdSource` is intentionally injected; Batch 14 does not choose a UUID/ULID dependency for production identity generation.

@@ -1126,3 +1126,49 @@ python3 conformance/provider_sdk_v1_runner.py -- <provider-command> [args...]
 ```
 
 Provider Protocol remains `1.0`; Batch 13 adds no Rust runtime API changes.
+
+## Batch 14 — Harness Runtime Composition Root
+
+Batch 14 turns `crates/harness-runtime` from its initial scaffold into the process-level composition root.
+
+The Runtime now owns static Provider/Profile composition and dynamic Agent lifecycle:
+
+```text
+HarnessRuntime
+├── ProviderRegistry
+├── LlmRegistry
+├── ProfileRegistry
+├── AgentRegistry
+├── SessionStore
+├── BlobStore
+├── AgentEventSource
+└── RuntimeIdSource
+```
+
+`HarnessRuntimeBuilder` starts ProviderHost processes, verifies configured provider identity against the initialized manifest, derives the LLM registry, compiles Agent profiles, validates Core-authoritative Tool definitions against provider manifests, and publishes the Runtime only after the complete composition succeeds.
+
+`AgentRegistry` reserves a Session before asynchronous Agent spawn and rejects duplicate opens, preserving the single active driver invariant at the process-composition layer.
+
+Normal Runtime shutdown is ordered:
+
+```text
+stop accepting lifecycle work
+        ↓
+shutdown + join Agents
+        ↓
+shutdown Providers in reverse startup order
+        ↓
+Stopped
+```
+
+Runtime lifecycle state is process-local and is not written to SessionEvent.
+
+Batch 14 keeps storage injection explicit. `HarnessRuntimeBuilder::in_memory(...)` is only a development/test convenience; durable SQLite/filesystem storage remains Batch 15 work.
+
+Reference acceptance test:
+
+```bash
+cargo test -p harness-runtime --test python_runtime_vertical -- --nocapture
+```
+
+It runs the existing Rust → ProviderHost → Python SDK → LLM → Tool → LLM flow through the new top-level Runtime API instead of manually assembling lower-level components.

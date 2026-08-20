@@ -235,6 +235,20 @@ dependencies = [
 [[package]]
 name = "harness-runtime"
 version = "0.1.0"
+dependencies = [
+ "harness-agent",
+ "harness-llm",
+ "harness-provider-host",
+ "harness-provider-protocol",
+ "harness-session",
+ "harness-storage",
+ "harness-storage-local",
+ "harness-tools",
+ "harness-types",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "harness-session"
