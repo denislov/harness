@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
 use harness_provider_host::ProviderHostConfig;
 use harness_provider_protocol::RuntimeInfo;
 use harness_types::ProviderId;
+use thiserror::Error;
 
 use crate::CredentialKey;
 
@@ -32,6 +33,77 @@ impl HarnessRuntimeInfo {
     pub(crate) fn validate(&self) -> bool {
         !self.name.trim().is_empty() && !self.version.trim().is_empty()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderSupervisorConfig {
+    health_poll_interval: Duration,
+    initial_restart_backoff: Duration,
+    max_restart_backoff: Duration,
+}
+
+impl Default for ProviderSupervisorConfig {
+    fn default() -> Self {
+        Self {
+            health_poll_interval: Duration::from_millis(100),
+            initial_restart_backoff: Duration::from_millis(100),
+            max_restart_backoff: Duration::from_secs(5),
+        }
+    }
+}
+
+impl ProviderSupervisorConfig {
+    pub fn new(
+        health_poll_interval: Duration,
+        initial_restart_backoff: Duration,
+        max_restart_backoff: Duration,
+    ) -> Result<Self, ProviderSupervisorConfigError> {
+        if health_poll_interval.is_zero() {
+            return Err(ProviderSupervisorConfigError::ZeroDuration(
+                "health_poll_interval",
+            ));
+        }
+        if initial_restart_backoff.is_zero() {
+            return Err(ProviderSupervisorConfigError::ZeroDuration(
+                "initial_restart_backoff",
+            ));
+        }
+        if max_restart_backoff.is_zero() {
+            return Err(ProviderSupervisorConfigError::ZeroDuration(
+                "max_restart_backoff",
+            ));
+        }
+        if max_restart_backoff < initial_restart_backoff {
+            return Err(ProviderSupervisorConfigError::MaxBackoffBeforeInitial);
+        }
+        Ok(Self {
+            health_poll_interval,
+            initial_restart_backoff,
+            max_restart_backoff,
+        })
+    }
+
+    pub const fn health_poll_interval(&self) -> Duration {
+        self.health_poll_interval
+    }
+
+    pub const fn initial_restart_backoff(&self) -> Duration {
+        self.initial_restart_backoff
+    }
+
+    pub const fn max_restart_backoff(&self) -> Duration {
+        self.max_restart_backoff
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ProviderSupervisorConfigError {
+    #[error("Provider supervisor {0} must be greater than zero")]
+    ZeroDuration(&'static str),
+
+    #[error("Provider supervisor max_restart_backoff must be >= initial_restart_backoff")]
+    MaxBackoffBeforeInitial,
 }
 
 #[derive(Clone, Debug)]

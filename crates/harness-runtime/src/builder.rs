@@ -7,7 +7,7 @@ use harness_storage_local::{DurableLocalStorage, MemoryBlobStore, MemorySessionS
 
 use crate::{
     AgentProfile, CredentialResolver, HarnessRuntime, HarnessRuntimeBuildError, HarnessRuntimeInfo,
-    LlmRegistry, ProfileRegistry, ProviderProcessSpec, ProviderRegistry,
+    LlmRegistry, ProfileRegistry, ProviderProcessSpec, ProviderRegistry, ProviderSupervisorConfig,
     RejectingCredentialResolver, RuntimeBuildStage, RuntimeEventBus, RuntimeEventKind,
     RuntimeIdSource, runtime::HarnessRuntimeParts,
 };
@@ -22,6 +22,7 @@ pub struct HarnessRuntimeBuilder {
     id_source: Option<Arc<dyn RuntimeIdSource>>,
     credential_resolver: Arc<dyn CredentialResolver>,
     runtime_events: RuntimeEventBus,
+    provider_supervisor_config: ProviderSupervisorConfig,
 }
 
 impl Default for HarnessRuntimeBuilder {
@@ -42,6 +43,7 @@ impl HarnessRuntimeBuilder {
             id_source: None,
             credential_resolver: Arc::new(RejectingCredentialResolver),
             runtime_events: RuntimeEventBus::default(),
+            provider_supervisor_config: ProviderSupervisorConfig::default(),
         }
     }
 
@@ -111,6 +113,11 @@ impl HarnessRuntimeBuilder {
         self
     }
 
+    pub fn provider_supervisor_config(mut self, config: ProviderSupervisorConfig) -> Self {
+        self.provider_supervisor_config = config;
+        self
+    }
+
     pub fn provider(mut self, spec: ProviderProcessSpec) -> Self {
         self.provider_specs.push(spec);
         self
@@ -151,6 +158,7 @@ impl HarnessRuntimeBuilder {
             id_source,
             credential_resolver,
             runtime_events,
+            provider_supervisor_config,
         } = self;
 
         let Some(session_store) = session_store else {
@@ -175,6 +183,7 @@ impl HarnessRuntimeBuilder {
             &runtime_info,
             credential_resolver,
             runtime_events.clone(),
+            provider_supervisor_config,
         )
         .await
         {

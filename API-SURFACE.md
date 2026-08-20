@@ -1980,3 +1980,42 @@ conformance/validate_crash_matrix.py
 ```
 
 The matrix records crash/fault cuts, their atomic append batches, expected recovery properties, and owning Cargo test commands.
+
+
+## Batch 21 API surface
+
+### `harness-provider-host`
+
+```rust
+ProviderGeneration
+ProviderSlot
+ProviderSlotStatus
+ProviderSlotError
+ProviderSlotLlmAdapter
+ProviderSlotToolAdapter
+```
+
+Slot-bound adapters resolve the current Ready provider generation per new operation. An in-flight operation remains pinned to the generation it started on.
+
+### `harness-runtime`
+
+```rust
+ProviderSupervisorConfig
+ProviderSupervisorConfigError
+ProviderQuarantineReason
+ProviderRegistry::status(...)
+ProviderRegistry::generation(...)
+HarnessRuntimeBuilder::provider_supervisor_config(...)
+```
+
+New RuntimeEvent kinds:
+
+```text
+provider/unhealthy
+provider/restarting
+provider/restart-failed
+provider/restarted
+provider/quarantined
+```
+
+Runtime composition continues to use the immutable Runtime-build baseline manifest for composition snapshots and restart compatibility.

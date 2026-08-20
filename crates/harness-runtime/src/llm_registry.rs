@@ -3,18 +3,21 @@ use std::{
     sync::Arc,
 };
 
-use harness_provider_host::ProviderHostLlmAdapter;
+use harness_provider_host::ProviderSlotLlmAdapter;
 use harness_provider_protocol::CapabilityDescriptor;
 use harness_types::ProviderId;
 
 use crate::{HarnessRuntimeBuildError, ProviderRegistry};
 
 struct LlmEntry {
-    adapter: Arc<ProviderHostLlmAdapter>,
+    adapter: Arc<ProviderSlotLlmAdapter>,
     models: BTreeSet<String>,
 }
 
-/// Runtime-level model capability index derived from provider manifests.
+/// Runtime-level model capability index derived from the baseline provider manifests.
+///
+/// Adapters bind to stable ProviderSlots, so compiled model routes survive a
+/// compatible Provider process restart without rebuilding Agent profiles.
 pub struct LlmRegistry {
     entries: BTreeMap<ProviderId, LlmEntry>,
 }
@@ -27,7 +30,7 @@ impl LlmRegistry {
         for provider_id in providers.provider_ids() {
             let manifest = providers
                 .manifest(provider_id)
-                .expect("ProviderRegistry entries always retain their manifest");
+                .expect("ProviderRegistry entries always retain their baseline manifest");
             let mut models = BTreeSet::new();
             for capability in &manifest.capabilities {
                 if let CapabilityDescriptor::Llm { models: declared } = capability {
@@ -37,19 +40,13 @@ impl LlmRegistry {
             if models.is_empty() {
                 continue;
             }
-            let host = providers
-                .host(provider_id)
-                .expect("ProviderRegistry manifest and host entries are paired");
-            let adapter = ProviderHostLlmAdapter::new(host).await.map_err(|source| {
-                HarnessRuntimeBuildError::LlmAdapter {
-                    provider: provider_id.clone(),
-                    source: Box::new(source),
-                }
-            })?;
+            let slot = providers
+                .slot(provider_id)
+                .expect("ProviderRegistry manifest and slot entries are paired");
             let _ = entries.insert(
                 provider_id.clone(),
                 LlmEntry {
-                    adapter: Arc::new(adapter),
+                    adapter: Arc::new(ProviderSlotLlmAdapter::new(slot)),
                     models,
                 },
             );
@@ -74,7 +71,7 @@ impl LlmRegistry {
         &self,
         provider_id: &ProviderId,
         model: &str,
-    ) -> Option<Arc<ProviderHostLlmAdapter>> {
+    ) -> Option<Arc<ProviderSlotLlmAdapter>> {
         let entry = self.entries.get(provider_id)?;
         if entry.models.contains(model) {
             Some(entry.adapter.clone())

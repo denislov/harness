@@ -1,27 +1,39 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-use harness_provider_host::{ProviderHost, ProviderHostConfig, ProviderState};
+use harness_provider_host::{
+    ProviderHost, ProviderHostConfig, ProviderHostError, ProviderSlot, ProviderSlotStatus,
+    ProviderState,
+};
 use harness_provider_protocol::ProviderManifest;
 use harness_types::ProviderId;
+use tokio::{sync::watch, task::JoinHandle, time::sleep};
 
 use crate::{
     CredentialResolver, HarnessRuntimeBuildError, HarnessRuntimeInfo, ProviderProcessSpec,
-    RuntimeEventBus, RuntimeEventKind,
+    ProviderQuarantineReason, ProviderSupervisorConfig, RuntimeEventBus, RuntimeEventKind,
 };
 
 struct ProviderEntry {
-    host: ProviderHost,
+    slot: ProviderSlot,
     manifest: ProviderManifest,
+    spec: ProviderProcessSpec,
 }
 
-/// Immutable set of provider processes owned by one HarnessRuntime.
+/// Stable provider catalog owned by one HarnessRuntime.
+///
+/// Each entry exposes one long-lived [`ProviderSlot`]. A supervisor may replace
+/// the process generation behind that slot only after the restarted manifest is
+/// semantically compatible with the baseline manifest captured during Runtime
+/// build. Compiled LLM and Tool adapters therefore never pin one ProviderHost.
 pub struct ProviderRegistry {
     entries: BTreeMap<ProviderId, ProviderEntry>,
     startup_order: Vec<ProviderId>,
     events: RuntimeEventBus,
+    supervisor_shutdown: watch::Sender<bool>,
+    supervisor_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ProviderRegistry {
@@ -49,11 +61,15 @@ impl ProviderRegistry {
         runtime: &HarnessRuntimeInfo,
         credentials: Arc<dyn CredentialResolver>,
         events: RuntimeEventBus,
+        supervisor_config: ProviderSupervisorConfig,
     ) -> Result<Self, HarnessRuntimeBuildError> {
+        let (supervisor_shutdown, _) = watch::channel(false);
         let mut registry = Self {
             entries: BTreeMap::new(),
             startup_order: Vec::new(),
             events,
+            supervisor_shutdown,
+            supervisor_tasks: Mutex::new(Vec::new()),
         };
 
         for spec in specs {
@@ -92,18 +108,8 @@ impl ProviderRegistry {
                 }
             };
 
-            let Some(manifest) = host.manifest().await else {
-                registry
-                    .events
-                    .publish(RuntimeEventKind::ProviderStartFailed {
-                        provider: expected.clone(),
-                    });
-                let _ = host.shutdown().await;
-                let _ = registry.shutdown_all().await;
-                return Err(HarnessRuntimeBuildError::ProviderManifestMissing(expected));
-            };
-            let actual = match ProviderId::new(manifest.provider_id.clone()) {
-                Ok(actual) => actual,
+            let manifest = match validate_initial_manifest(&expected, &host).await {
+                Ok(manifest) => manifest,
                 Err(error) => {
                     registry
                         .events
@@ -112,41 +118,58 @@ impl ProviderRegistry {
                         });
                     let _ = host.shutdown().await;
                     let _ = registry.shutdown_all().await;
-                    return Err(HarnessRuntimeBuildError::InvalidManifestProviderId {
-                        value: manifest.provider_id,
-                        message: error.to_string(),
-                    });
+                    return Err(error);
                 }
             };
-            if actual != expected {
-                registry
-                    .events
-                    .publish(RuntimeEventKind::ProviderStartFailed {
-                        provider: expected.clone(),
-                    });
-                let _ = host.shutdown().await;
-                let _ = registry.shutdown_all().await;
-                return Err(HarnessRuntimeBuildError::ProviderIdentityMismatch {
-                    expected,
-                    actual,
-                });
-            }
-
             registry.events.publish(RuntimeEventKind::ProviderReady {
-                provider: actual.clone(),
+                provider: expected.clone(),
                 provider_version: manifest.provider_version.clone(),
             });
-            registry.startup_order.push(actual.clone());
-            let replaced = registry
-                .entries
-                .insert(actual, ProviderEntry { host, manifest });
+
+            let slot = ProviderSlot::new(expected.clone(), host, manifest.clone())
+                .expect("initial ProviderHost manifest identity was already validated");
+            registry.startup_order.push(expected.clone());
+            let replaced = registry.entries.insert(
+                expected,
+                ProviderEntry {
+                    slot,
+                    manifest,
+                    spec,
+                },
+            );
             debug_assert!(
                 replaced.is_none(),
                 "provider ids were preflighted as unique"
             );
         }
 
+        registry.spawn_supervisors(runtime.clone(), credentials, supervisor_config);
         Ok(registry)
+    }
+
+    fn spawn_supervisors(
+        &mut self,
+        runtime: HarnessRuntimeInfo,
+        credentials: Arc<dyn CredentialResolver>,
+        config: ProviderSupervisorConfig,
+    ) {
+        let tasks = self
+            .supervisor_tasks
+            .get_mut()
+            .expect("ProviderRegistry supervisor task mutex is not poisoned");
+        for (provider_id, entry) in &self.entries {
+            let task = tokio::spawn(supervise_provider(
+                provider_id.clone(),
+                entry.slot.clone(),
+                entry.spec.clone(),
+                runtime.clone(),
+                credentials.clone(),
+                self.events.clone(),
+                config,
+                self.supervisor_shutdown.subscribe(),
+            ));
+            tasks.push(task);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -165,23 +188,59 @@ impl ProviderRegistry {
         self.entries.keys()
     }
 
-    pub(crate) fn host(&self, provider_id: &ProviderId) -> Option<ProviderHost> {
+    pub fn status(&self, provider_id: &ProviderId) -> Option<ProviderSlotStatus> {
         self.entries
             .get(provider_id)
-            .map(|entry| entry.host.clone())
+            .map(|entry| entry.slot.status())
+    }
+
+    pub fn generation(&self, provider_id: &ProviderId) -> Option<u32> {
+        self.status(provider_id).map(ProviderSlotStatus::generation)
+    }
+
+    pub(crate) fn slot(&self, provider_id: &ProviderId) -> Option<ProviderSlot> {
+        self.entries
+            .get(provider_id)
+            .map(|entry| entry.slot.clone())
     }
 
     pub async fn state(&self, provider_id: &ProviderId) -> Option<ProviderState> {
-        let host = self.host(provider_id)?;
-        Some(host.state().await)
+        let entry = self.entries.get(provider_id)?;
+        match entry.slot.status() {
+            ProviderSlotStatus::Ready { .. } => {
+                let generation = entry.slot.current()?;
+                Some(generation.host().state().await)
+            }
+            ProviderSlotStatus::Unavailable { .. } | ProviderSlotStatus::Quarantined { .. } => {
+                Some(ProviderState::Unhealthy)
+            }
+            ProviderSlotStatus::Stopped { .. } => Some(ProviderState::Stopped),
+        }
     }
 
+    /// Returns the immutable baseline manifest used for Runtime composition and
+    /// restart compatibility checks. Compatible restarts never replace it.
     pub(crate) fn manifest(&self, provider_id: &ProviderId) -> Option<&ProviderManifest> {
         self.entries.get(provider_id).map(|entry| &entry.manifest)
     }
 
     pub(crate) async fn shutdown_all(&self) -> Vec<String> {
+        let _ = self.supervisor_shutdown.send(true);
+        let tasks = {
+            let mut guard = self
+                .supervisor_tasks
+                .lock()
+                .expect("ProviderRegistry supervisor task mutex is not poisoned");
+            std::mem::take(&mut *guard)
+        };
+
         let mut failures = Vec::new();
+        for task in tasks {
+            if let Err(error) = task.await {
+                failures.push(format!("provider supervisor task failed to join: {error}"));
+            }
+        }
+
         for provider_id in self.startup_order.iter().rev() {
             let Some(entry) = self.entries.get(provider_id) else {
                 continue;
@@ -189,19 +248,252 @@ impl ProviderRegistry {
             self.events.publish(RuntimeEventKind::ProviderStopping {
                 provider: provider_id.clone(),
             });
-            let failed = match entry.host.shutdown().await {
-                Ok(()) => false,
-                Err(error) => {
-                    failures.push(format!("provider {provider_id}: {error}"));
-                    true
-                }
+            let failed = match entry.slot.host_for_shutdown() {
+                Some(host) => match host.shutdown().await {
+                    Ok(()) => false,
+                    Err(error) => {
+                        failures.push(format!("provider {provider_id}: {error}"));
+                        true
+                    }
+                },
+                None => false,
             };
+            entry.slot.mark_stopped();
             self.events.publish(RuntimeEventKind::ProviderStopped {
                 provider: provider_id.clone(),
                 failed,
             });
         }
         failures
+    }
+}
+
+async fn validate_initial_manifest(
+    expected: &ProviderId,
+    host: &ProviderHost,
+) -> Result<ProviderManifest, HarnessRuntimeBuildError> {
+    let Some(manifest) = host.manifest().await else {
+        return Err(HarnessRuntimeBuildError::ProviderManifestMissing(
+            expected.clone(),
+        ));
+    };
+    let actual = ProviderId::new(manifest.provider_id.clone()).map_err(|error| {
+        HarnessRuntimeBuildError::InvalidManifestProviderId {
+            value: manifest.provider_id.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    if &actual != expected {
+        return Err(HarnessRuntimeBuildError::ProviderIdentityMismatch {
+            expected: expected.clone(),
+            actual,
+        });
+    }
+    Ok(manifest)
+}
+
+async fn supervise_provider(
+    provider_id: ProviderId,
+    slot: ProviderSlot,
+    spec: ProviderProcessSpec,
+    runtime: HarnessRuntimeInfo,
+    credentials: Arc<dyn CredentialResolver>,
+    events: RuntimeEventBus,
+    config: ProviderSupervisorConfig,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+
+        let failed_generation = match slot.status() {
+            ProviderSlotStatus::Ready { generation } => {
+                if !sleep_or_shutdown(config.health_poll_interval(), &mut shutdown).await {
+                    return;
+                }
+                let Some(current) = slot.current() else {
+                    continue;
+                };
+                if current.generation() != generation {
+                    continue;
+                }
+                if current.host().state().await == ProviderState::Ready {
+                    continue;
+                }
+                let _ = slot.mark_unavailable(generation);
+                events.publish(RuntimeEventKind::ProviderUnhealthy {
+                    provider: provider_id.clone(),
+                    generation,
+                });
+                generation
+            }
+            ProviderSlotStatus::Unavailable { generation } => {
+                events.publish(RuntimeEventKind::ProviderUnhealthy {
+                    provider: provider_id.clone(),
+                    generation,
+                });
+                generation
+            }
+            ProviderSlotStatus::Quarantined { .. } | ProviderSlotStatus::Stopped { .. } => {
+                return;
+            }
+        };
+
+        if let Some(host) = slot.host_for_shutdown() {
+            let _ = host.shutdown().await;
+        }
+
+        let Some(next_generation) = failed_generation.checked_add(1) else {
+            let _ = slot.quarantine(failed_generation);
+            events.publish(RuntimeEventKind::ProviderQuarantined {
+                provider: provider_id.clone(),
+                generation: failed_generation,
+                reason: ProviderQuarantineReason::GenerationExhausted,
+            });
+            return;
+        };
+
+        let mut attempt = 1_u32;
+        let mut backoff = config.initial_restart_backoff();
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            events.publish(RuntimeEventKind::ProviderRestarting {
+                provider: provider_id.clone(),
+                generation: failed_generation,
+                attempt,
+            });
+
+            let restart = restart_once(
+                &provider_id,
+                &slot,
+                &spec,
+                &runtime,
+                credentials.as_ref(),
+                &events,
+            );
+            let outcome = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                outcome = restart => outcome,
+            };
+
+            match outcome {
+                RestartOutcome::Ready { host, manifest } => {
+                    let provider_version = manifest.provider_version.clone();
+                    if slot.replace(next_generation, host, manifest).is_err() {
+                        return;
+                    }
+                    events.publish(RuntimeEventKind::ProviderRestarted {
+                        provider: provider_id.clone(),
+                        generation: next_generation,
+                        provider_version,
+                    });
+                    break;
+                }
+                RestartOutcome::Retry => {
+                    events.publish(RuntimeEventKind::ProviderRestartFailed {
+                        provider: provider_id.clone(),
+                        generation: failed_generation,
+                        attempt,
+                    });
+                    if !sleep_or_shutdown(backoff, &mut shutdown).await {
+                        return;
+                    }
+                    backoff =
+                        std::cmp::min(backoff.saturating_mul(2), config.max_restart_backoff());
+                    attempt = attempt.saturating_add(1);
+                }
+                RestartOutcome::Quarantine { reason } => {
+                    let _ = slot.quarantine(failed_generation);
+                    events.publish(RuntimeEventKind::ProviderQuarantined {
+                        provider: provider_id.clone(),
+                        generation: failed_generation,
+                        reason,
+                    });
+                    return;
+                }
+            }
+        }
+    }
+}
+
+enum RestartOutcome {
+    Ready {
+        host: ProviderHost,
+        manifest: ProviderManifest,
+    },
+    Retry,
+    Quarantine {
+        reason: ProviderQuarantineReason,
+    },
+}
+
+async fn restart_once(
+    expected: &ProviderId,
+    slot: &ProviderSlot,
+    spec: &ProviderProcessSpec,
+    runtime: &HarnessRuntimeInfo,
+    credentials: &dyn CredentialResolver,
+    events: &RuntimeEventBus,
+) -> RestartOutcome {
+    let host_config = match resolve_host_config(spec, runtime, credentials, events).await {
+        Ok(config) => config,
+        Err(_) => return RestartOutcome::Retry,
+    };
+    let host = match ProviderHost::start(host_config).await {
+        Ok(host) => host,
+        Err(ProviderHostError::InvalidManifest(_)) => {
+            return RestartOutcome::Quarantine {
+                reason: ProviderQuarantineReason::InvalidManifest,
+            };
+        }
+        Err(_) => return RestartOutcome::Retry,
+    };
+    let Some(manifest) = host.manifest().await else {
+        let _ = host.shutdown().await;
+        return RestartOutcome::Retry;
+    };
+    let actual = match ProviderId::new(manifest.provider_id.clone()) {
+        Ok(actual) => actual,
+        Err(_) => {
+            let _ = host.shutdown().await;
+            return RestartOutcome::Quarantine {
+                reason: ProviderQuarantineReason::InvalidIdentity,
+            };
+        }
+    };
+    if &actual != expected {
+        let _ = host.shutdown().await;
+        return RestartOutcome::Quarantine {
+            reason: ProviderQuarantineReason::IdentityMismatch,
+        };
+    }
+    if !slot.manifest_compatible(&manifest) {
+        let _ = host.shutdown().await;
+        return RestartOutcome::Quarantine {
+            reason: ProviderQuarantineReason::ManifestDrift,
+        };
+    }
+    RestartOutcome::Ready { host, manifest }
+}
+
+async fn sleep_or_shutdown(
+    duration: std::time::Duration,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    if *shutdown.borrow() {
+        return false;
+    }
+    tokio::select! {
+        _ = sleep(duration) => true,
+        changed = shutdown.changed() => changed.is_ok() && !*shutdown.borrow(),
     }
 }
 

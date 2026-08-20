@@ -5,7 +5,7 @@ use std::{
 
 use harness_agent::{AgentActorConfig, AgentLlmRuntime, AgentToolRuntime, DEFAULT_LLM_TIMEOUT_MS};
 use harness_llm::{LlmProvider, ModelOptions, ModelRequestConfig};
-use harness_provider_host::ProviderHostToolAdapter;
+use harness_provider_host::ProviderSlotToolAdapter;
 use harness_storage::BlobStore;
 use harness_tools::{
     IdempotencySupport, ToolArgumentValidator, ToolDefinition, ToolExecutor, ToolPolicy,
@@ -259,19 +259,19 @@ async fn compile_profile(
             .provider_version
             .clone();
         let validator_identity = binding.validator.composition_identity();
-        let Some(host) = providers.host(&binding.provider) else {
+        let Some(slot) = providers.slot(&binding.provider) else {
             return Err(HarnessRuntimeBuildError::ProfileProviderNotFound {
                 profile: profile_name.to_owned(),
                 provider: binding.provider,
             });
         };
-        let adapter = ProviderHostToolAdapter::from_definition(host, &binding.definition)
-            .await
-            .map_err(|source| HarnessRuntimeBuildError::ToolAdapter {
+        let adapter = ProviderSlotToolAdapter::from_definition(slot, &binding.definition).map_err(
+            |source| HarnessRuntimeBuildError::ToolAdapter {
                 profile: profile_name.to_owned(),
                 tool: tool_name,
                 source: Box::new(source),
-            })?;
+            },
+        )?;
         composition_tools.push(ExecutionToolComposition {
             definition: binding.definition.clone(),
             provider: binding.provider.clone(),

@@ -1252,3 +1252,12 @@ Batch 20 adds deterministic crash/fault-injection conformance without changing p
 The crash matrix reopens the same Session after step-entry, model-request, assistant, ToolCall, approval, dispatch, result, step, and turn commit boundaries. Provider-fault cases separately verify read-only retry, keyed idempotent-write deduplication, and fail-closed non-idempotent writes. One dispatch crash case drops and reopens the real SQLite/filesystem durable-local stores, and the Batch 19 composition-drift acceptance remains part of the matrix.
 
 See `spec/batch-20-crash-fault-injection-conformance.md` and `conformance/crash-matrix-v1.json`.
+
+
+# Harness API Batch 21
+
+Batch 21 adds Provider process supervision behind stable generation slots. Compiled LLM and Tool capability adapters now bind a `ProviderSlot` rather than the concrete `ProviderHost` created during Runtime build, so a compatible restarted process can serve existing compiled Agent profiles without rebuilding Runtime composition.
+
+The supervisor detects unhealthy generations, re-resolves credentials, retries process startup with capped exponential backoff, and replaces the slot only when the restarted manifest is semantically equal to the Runtime-build baseline. Identity or manifest drift enters quarantine and is never hot-swapped into the active composition. Supervisor logic restores availability only; durable Tool/model retry decisions remain owned by Agent/RecoveryAnalyzer.
+
+See `spec/batch-21-provider-supervisor.md`.

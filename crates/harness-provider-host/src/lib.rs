@@ -6,9 +6,15 @@
 
 mod adapter;
 mod host;
+mod slot;
 
 pub use adapter::{ProviderAdapterError, ProviderHostLlmAdapter, ProviderHostToolAdapter};
 pub use host::{
     LlmStreamHandle, LlmStreamItem, ProviderHost, ProviderHostConfig, ProviderHostError,
     ProviderState, ProviderStreamError,
+};
+
+pub use slot::{
+    ProviderGeneration, ProviderSlot, ProviderSlotError, ProviderSlotLlmAdapter,
+    ProviderSlotStatus, ProviderSlotToolAdapter,
 };

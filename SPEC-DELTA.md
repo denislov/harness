@@ -1098,3 +1098,19 @@ See `spec/batch-19-durable-execution-composition.md`.
 - Does not add Provider supervision, production failpoints, Session schema evolution, hot reload, or parallel Tool scheduling.
 
 See `spec/batch-20-crash-fault-injection-conformance.md`.
+
+
+## Batch 21 spec delta — Provider Supervisor + Generation Slots
+
+- Adds a stable `ProviderSlot` per configured provider; generation 1 is the Runtime-build Host and compatible restarts increment by one.
+- Compiled LLM/Tool adapters resolve the slot for each new external operation and no longer pin the initial `ProviderHost`.
+- Adds one supervisor task per provider with health polling, credential re-resolution, and capped exponential restart backoff.
+- Adds RuntimeEvents for unhealthy, restarting, restart-failed, restarted, and quarantined transitions with generation numbers.
+- Restart replacement requires semantic equality with the immutable baseline manifest: provider ID/version, Protocol version, Tool contract/idempotency semantics, and LLM model set. Ordering differences are ignored.
+- Identity or manifest drift quarantines the failed generation; the candidate process is shut down and never becomes current.
+- Compatible process restart does not rotate the Batch 19 execution-composition epoch.
+- Supervisor logic restores provider availability only. It does not issue LLM or Tool retries and does not alter Batch 20 durable retry/fail-closed rules. Slot waiting remains inside an already-durable Tool dispatch attempt and never weakens non-idempotent ambiguity.
+- Runtime shutdown stops supervisor tasks before shutting current Provider Hosts in reverse startup order.
+- File-configurable supervisor policy, dynamic provider membership, quarantine release, and Provider health RPCs remain deferred.
+
+See `spec/batch-21-provider-supervisor.md`.

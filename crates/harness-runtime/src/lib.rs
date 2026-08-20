@@ -23,18 +23,22 @@ pub use composition::{
     EXECUTION_COMPOSITION_MEDIA_TYPE, EXECUTION_COMPOSITION_SCHEMA_VERSION,
     ExecutionCompositionSnapshot, ExecutionModelComposition, ExecutionToolComposition,
 };
-pub use config::{HarnessRuntimeInfo, ProviderProcessSpec};
+pub use config::{
+    HarnessRuntimeInfo, ProviderProcessSpec, ProviderSupervisorConfig,
+    ProviderSupervisorConfigError,
+};
 pub use credential::{
     CredentialKey, CredentialKeyError, CredentialResolveError, CredentialResolver,
     RejectingCredentialResolver, SecretValue,
 };
 pub use error::{HarnessRuntimeBuildError, HarnessRuntimeError};
+pub use harness_provider_host::ProviderSlotStatus;
 pub use identity::RuntimeIdSource;
 pub use llm_registry::LlmRegistry;
 pub use profile::{AgentProfile, ModelBinding, ProfileRegistry, RuntimeToolBinding};
 pub use provider_registry::ProviderRegistry;
 pub use runtime::{HarnessRuntime, HarnessRuntimeState};
 pub use runtime_event::{
-    DEFAULT_RUNTIME_EVENT_CAPACITY, RUNTIME_EVENT_SCHEMA_VERSION, RuntimeBuildStage, RuntimeEvent,
-    RuntimeEventBus, RuntimeEventBusError, RuntimeEventKind,
+    DEFAULT_RUNTIME_EVENT_CAPACITY, ProviderQuarantineReason, RUNTIME_EVENT_SCHEMA_VERSION,
+    RuntimeBuildStage, RuntimeEvent, RuntimeEventBus, RuntimeEventBusError, RuntimeEventKind,
 };

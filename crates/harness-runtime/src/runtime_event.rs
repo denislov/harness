@@ -46,6 +46,17 @@ pub enum RuntimeBuildStage {
     Profile,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ProviderQuarantineReason {
+    InvalidIdentity,
+    IdentityMismatch,
+    InvalidManifest,
+    ManifestDrift,
+    GenerationExhausted,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RuntimeEventKind {
@@ -73,6 +84,30 @@ pub enum RuntimeEventKind {
     },
     ProviderStartFailed {
         provider: ProviderId,
+    },
+    ProviderUnhealthy {
+        provider: ProviderId,
+        generation: u32,
+    },
+    ProviderRestarting {
+        provider: ProviderId,
+        generation: u32,
+        attempt: u32,
+    },
+    ProviderRestartFailed {
+        provider: ProviderId,
+        generation: u32,
+        attempt: u32,
+    },
+    ProviderRestarted {
+        provider: ProviderId,
+        generation: u32,
+        provider_version: String,
+    },
+    ProviderQuarantined {
+        provider: ProviderId,
+        generation: u32,
+        reason: ProviderQuarantineReason,
     },
     ProviderStopping {
         provider: ProviderId,
@@ -149,6 +184,64 @@ impl RuntimeEventKind {
             Self::ProviderStartFailed { provider } => (
                 "provider/start-failed",
                 Some(RuntimeEventDataRef::Provider { provider }),
+            ),
+            Self::ProviderUnhealthy {
+                provider,
+                generation,
+            } => (
+                "provider/unhealthy",
+                Some(RuntimeEventDataRef::ProviderGeneration {
+                    provider,
+                    generation: *generation,
+                }),
+            ),
+            Self::ProviderRestarting {
+                provider,
+                generation,
+                attempt,
+            } => (
+                "provider/restarting",
+                Some(RuntimeEventDataRef::ProviderRestartAttempt {
+                    provider,
+                    generation: *generation,
+                    attempt: *attempt,
+                }),
+            ),
+            Self::ProviderRestartFailed {
+                provider,
+                generation,
+                attempt,
+            } => (
+                "provider/restart-failed",
+                Some(RuntimeEventDataRef::ProviderRestartAttempt {
+                    provider,
+                    generation: *generation,
+                    attempt: *attempt,
+                }),
+            ),
+            Self::ProviderRestarted {
+                provider,
+                generation,
+                provider_version,
+            } => (
+                "provider/restarted",
+                Some(RuntimeEventDataRef::ProviderRestarted {
+                    provider,
+                    generation: *generation,
+                    provider_version,
+                }),
+            ),
+            Self::ProviderQuarantined {
+                provider,
+                generation,
+                reason,
+            } => (
+                "provider/quarantined",
+                Some(RuntimeEventDataRef::ProviderQuarantined {
+                    provider,
+                    generation: *generation,
+                    reason: *reason,
+                }),
             ),
             Self::ProviderStopping { provider } => (
                 "provider/stopping",
@@ -258,6 +351,26 @@ enum RuntimeEventDataRef<'a> {
         provider: &'a ProviderId,
         #[serde(rename = "providerVersion")]
         provider_version: &'a str,
+    },
+    ProviderGeneration {
+        provider: &'a ProviderId,
+        generation: u32,
+    },
+    ProviderRestartAttempt {
+        provider: &'a ProviderId,
+        generation: u32,
+        attempt: u32,
+    },
+    ProviderRestarted {
+        provider: &'a ProviderId,
+        generation: u32,
+        #[serde(rename = "providerVersion")]
+        provider_version: &'a str,
+    },
+    ProviderQuarantined {
+        provider: &'a ProviderId,
+        generation: u32,
+        reason: ProviderQuarantineReason,
     },
     ProviderStopped {
         provider: &'a ProviderId,
