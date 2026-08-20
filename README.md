@@ -1108,3 +1108,21 @@ Provider cancellation remains advisory. Agent durable cancellation and Tool unkn
 ## Batch 12 — Python Provider SDK v0.1
 
 Batch 12 adds `sdk/python/harness_provider_sdk`, the first author-facing SDK above Provider Protocol v1. The SDK owns JSON-RPC/NDJSON framing, manifest generation, Tool/LLM dispatch, LLM sequence assignment, operation tracking, cancellation and shutdown. `providers/example-python/provider.py` now uses the SDK while keeping the same `echo`, `echo-model`, and `agent-model` capabilities, so the existing Rust Python vertical-slice test now traverses the SDK layer as well. Provider Protocol remains `1.0`.
+
+## Batch 13 — Provider SDK Conformance Contract v1
+
+Batch 13 freezes a language-neutral Provider SDK acceptance suite under `conformance/provider-sdk-v1/`. Golden JSON fixtures verify exact manifest, Tool, LLM streaming, cancellation, error normalization, and process-wide operation identity behavior. The first conformance provider is implemented with the Python SDK, but the same fixture suite is intended for future TypeScript/Go SDKs without per-language golden forks.
+
+Run the in-tree Python SDK against the shared contract:
+
+```bash
+python3 conformance/run_python_sdk_v1.py
+```
+
+Or run the generic process suite against any conformance-provider executable:
+
+```bash
+python3 conformance/provider_sdk_v1_runner.py -- <provider-command> [args...]
+```
+
+Provider Protocol remains `1.0`; Batch 13 adds no Rust runtime API changes.

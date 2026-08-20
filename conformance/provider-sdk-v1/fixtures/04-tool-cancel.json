@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "name": "tool-cancel",
+  "description": "Cancelling a pending Tool completes its original RPC with a cancelled outcome.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_cancel",
+        "method": "tool.invoke",
+        "params": {
+          "operationId": "inv_cancel",
+          "invocationId": "inv_cancel",
+          "callId": "call_cancel",
+          "sessionId": "ses_conformance",
+          "tool": "conformance.wait",
+          "argumentsJson": "{}",
+          "attempt": 1,
+          "idempotencyKey": "idem_cancel"
+        }
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "method": "capability.cancel",
+        "params": {
+          "operationId": "inv_cancel",
+          "cause": {"kind": "user"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_cancel",
+        "result": {
+          "outcome": {"kind": "cancelled", "cause": "user"}
+        }
+      }
+    }
+  ]
+}

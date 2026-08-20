@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "name": "operation-id-collision",
+  "description": "Operation IDs are process-wide across Tool and LLM capabilities while active.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_collision_llm",
+        "method": "llm.start",
+        "params": {
+          "operationId": "op_collision",
+          "streamId": "str_collision",
+          "request": {
+            "requestId": "op_collision",
+            "sessionId": "ses_conformance",
+            "provider": "sdk-conformance",
+            "model": "conformance-wait",
+            "messages": [],
+            "options": {}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_collision_llm",
+        "result": {"accepted": true, "streamId": "str_collision"}
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_collision_tool",
+        "method": "tool.invoke",
+        "params": {
+          "operationId": "op_collision",
+          "invocationId": "op_collision",
+          "callId": "call_collision",
+          "sessionId": "ses_conformance",
+          "tool": "conformance.echo",
+          "argumentsJson": "{}",
+          "attempt": 1,
+          "idempotencyKey": "idem_collision"
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_collision_tool",
+        "error": {"code": -32602, "message": "operationId is already active"}
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "method": "capability.cancel",
+        "params": {
+          "operationId": "op_collision",
+          "cause": {"kind": "user"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_collision",
+          "seq": 1,
+          "event": {
+            "type": "finish",
+            "reason": "cancelled",
+            "failure": {
+              "code": "CANCELLED",
+              "message": "provider operation cancelled: user",
+              "details": {"cause": "user"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

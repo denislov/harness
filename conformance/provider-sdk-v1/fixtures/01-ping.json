@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "ping",
+  "description": "The SDK answers provider.ping without involving provider author code.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_ping",
+        "method": "provider.ping",
+        "params": {}
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_ping",
+        "result": {"ok": true}
+      }
+    }
+  ]
+}

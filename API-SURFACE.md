@@ -1634,3 +1634,22 @@ New source package: `sdk/python/harness_provider_sdk`.
 Primary authoring surface: `ProviderApp`, `SideEffect`, `ToolResult`, `ToolContext`, `ModelContext`, `LlmStreamWriter`, `CancellationToken`, `CancelCause`, `last_text`, and `trailing_tool_result_text`.
 
 The SDK generates ProviderManifest from decorators and owns Provider Protocol v1 lifecycle/dispatch framing. Rust public APIs are unchanged except for the implementation-only Clippy cleanup in `harness-provider-host/src/adapter.rs`.
+
+## Batch 13 — Provider SDK Conformance Contract v1
+
+Batch 13 adds no Rust public API.
+
+New conformance surfaces:
+
+```text
+conformance/provider-sdk-v1/contract.json
+conformance/provider-sdk-v1/fixture.schema.json
+conformance/provider-sdk-v1/fixtures/*.json
+conformance/provider_sdk_v1_runner.py
+conformance/run_python_sdk_v1.py
+conformance/providers/python_sdk_v1.py
+```
+
+The generic runner treats a provider as an opaque subprocess and compares parsed JSON frames using exact structural equality. Each fixture gets a fresh process plus automatic initialize/manifest verification and graceful shutdown verification.
+
+The canonical conformance manifest and behavior are normative test data. Future Provider SDKs implement the same conformance provider and run the same fixtures rather than maintaining language-specific expected outputs.

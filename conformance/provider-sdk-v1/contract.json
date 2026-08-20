@@ -1,0 +1,48 @@
+{
+  "suiteVersion": "1.0",
+  "protocolVersion": "1.0",
+  "runtime": {
+    "name": "provider-sdk-conformance",
+    "version": "1.0.0"
+  },
+  "manifest": {
+    "providerId": "sdk-conformance",
+    "providerVersion": "1.0.0",
+    "protocolVersion": "1.0",
+    "capabilities": [
+      {
+        "kind": "tool",
+        "name": "conformance.echo",
+        "version": "1",
+        "parallelSafe": true,
+        "sideEffect": "read-only",
+        "supportsIdempotencyKey": false
+      },
+      {
+        "kind": "tool",
+        "name": "conformance.fail",
+        "version": "1",
+        "parallelSafe": true,
+        "sideEffect": "read-only",
+        "supportsIdempotencyKey": false
+      },
+      {
+        "kind": "tool",
+        "name": "conformance.wait",
+        "version": "1",
+        "parallelSafe": true,
+        "sideEffect": "read-only",
+        "supportsIdempotencyKey": false
+      },
+      {
+        "kind": "llm",
+        "models": [
+          "conformance-text",
+          "conformance-tool-call",
+          "conformance-error",
+          "conformance-wait"
+        ]
+      }
+    ]
+  }
+}

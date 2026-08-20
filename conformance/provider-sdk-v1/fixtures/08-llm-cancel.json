@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "name": "llm-cancel",
+  "description": "Cancelling a pending model produces exactly one terminal cancelled finish.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_cancel",
+        "method": "llm.start",
+        "params": {
+          "operationId": "req_cancel",
+          "streamId": "str_cancel",
+          "request": {
+            "requestId": "req_cancel",
+            "sessionId": "ses_conformance",
+            "provider": "sdk-conformance",
+            "model": "conformance-wait",
+            "messages": [],
+            "options": {}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_cancel",
+        "result": {"accepted": true, "streamId": "str_cancel"}
+      }
+    },
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "method": "capability.cancel",
+        "params": {
+          "operationId": "req_cancel",
+          "cause": {"kind": "timeout"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_cancel",
+          "seq": 1,
+          "event": {
+            "type": "finish",
+            "reason": "cancelled",
+            "failure": {
+              "code": "CANCELLED",
+              "message": "provider operation cancelled: timeout",
+              "details": {"cause": "timeout"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "name": "llm-error",
+  "description": "An uncaught model-handler failure is normalized to one terminal error finish.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_error",
+        "method": "llm.start",
+        "params": {
+          "operationId": "req_error",
+          "streamId": "str_error",
+          "request": {
+            "requestId": "req_error",
+            "sessionId": "ses_conformance",
+            "provider": "sdk-conformance",
+            "model": "conformance-error",
+            "messages": [],
+            "options": {}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_error",
+        "result": {"accepted": true, "streamId": "str_error"}
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_error",
+          "seq": 1,
+          "event": {
+            "type": "finish",
+            "reason": "error",
+            "failure": {
+              "code": "INTERNAL",
+              "message": "model handler failed: conformance model failure"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

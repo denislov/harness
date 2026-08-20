@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "name": "tool-success",
+  "description": "A Tool handler returns one deterministic successful text result.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_success",
+        "method": "tool.invoke",
+        "params": {
+          "operationId": "inv_success",
+          "invocationId": "inv_success",
+          "callId": "call_success",
+          "sessionId": "ses_conformance",
+          "tool": "conformance.echo",
+          "argumentsJson": "{\"z\":1,\"a\":\"hello\"}",
+          "attempt": 1,
+          "idempotencyKey": "idem_success"
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_success",
+        "result": {
+          "outcome": {
+            "kind": "success",
+            "content": [
+              {"type": "text", "text": "{\"a\":\"hello\",\"z\":1}"}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

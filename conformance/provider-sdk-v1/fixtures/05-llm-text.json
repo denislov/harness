@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "name": "llm-text",
+  "description": "The SDK sequences text, usage, and automatic completed finish events.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_text",
+        "method": "llm.start",
+        "params": {
+          "operationId": "req_text",
+          "streamId": "str_text",
+          "request": {
+            "requestId": "req_text",
+            "sessionId": "ses_conformance",
+            "provider": "sdk-conformance",
+            "model": "conformance-text",
+            "messages": [
+              {
+                "id": "msg_text",
+                "role": "user",
+                "source": {"kind": "user"},
+                "content": [{"type": "text", "text": "hello"}]
+              }
+            ],
+            "options": {}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_text",
+        "result": {"accepted": true, "streamId": "str_text"}
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_text",
+          "seq": 1,
+          "event": {"type": "block-start", "index": 0, "blockType": "text"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_text",
+          "seq": 2,
+          "event": {"type": "text-delta", "index": 0, "text": "golden text"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_text",
+          "seq": 3,
+          "event": {
+            "type": "block-end",
+            "index": 0,
+            "block": {"type": "text", "text": "golden text"}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_text",
+          "seq": 4,
+          "event": {
+            "type": "usage",
+            "usage": {"inputTokens": 7, "outputTokens": 3, "cacheReadTokens": 2}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_text",
+          "seq": 5,
+          "event": {"type": "finish", "reason": "completed"}
+        }
+      }
+    }
+  ]
+}

@@ -982,3 +982,19 @@ LLM/Tool timeout tasks issue best-effort `CancelCause::Timeout` through the doma
 ## Batch 12 — Python Provider SDK v0.1
 
 Provider SDKs are formally defined as optional authoring layers above Provider Protocol v1. The Python reference SDK owns stdio JSON-RPC/NDJSON plumbing, generated capability manifests, Tool/LLM operation dispatch, LLM stream sequencing and best-effort cancellation. The wire protocol remains unchanged at version `1.0`; Core remains authoritative for durable cancellation and unknown-outcome recovery semantics.
+
+## Batch 13 — Provider SDK Conformance Contract v1
+
+Batch 13 introduces a conformance-suite version independent from Provider Protocol versioning. Provider Protocol remains `1.0`; Provider SDK Conformance suite `1.0` freezes one canonical provider manifest and exact JSON transcript fixtures.
+
+Normative decisions:
+
+1. SDK conformance is distinct from wire-protocol conformance and Agent E2E acceptance.
+2. Every fixture runs in a fresh provider process.
+3. The runner automatically verifies the exact canonical manifest before every scenario and graceful shutdown afterward.
+4. Golden outputs use exact structural JSON equality; v1 has no wildcard or partial matcher.
+5. Active `operationId` ownership is process-wide across Tool and LLM capabilities.
+6. Tool/LLM cancellation must preserve the cancellation cause at the provider protocol boundary.
+7. Future language SDKs MUST run the same golden fixtures; implementation differences do not justify per-language expected-output forks.
+
+See `spec/batch-13-provider-sdk-conformance.md`.

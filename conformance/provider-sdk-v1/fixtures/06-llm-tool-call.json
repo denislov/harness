@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "name": "llm-tool-call",
+  "description": "The SDK emits a deterministic ToolCall block and assigns contiguous sequence numbers.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_tool",
+        "method": "llm.start",
+        "params": {
+          "operationId": "req_tool",
+          "streamId": "str_tool",
+          "request": {
+            "requestId": "req_tool",
+            "sessionId": "ses_conformance",
+            "provider": "sdk-conformance",
+            "model": "conformance-tool-call",
+            "messages": [],
+            "options": {}
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_llm_tool",
+        "result": {"accepted": true, "streamId": "str_tool"}
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_tool",
+          "seq": 1,
+          "event": {"type": "block-start", "index": 0, "blockType": "tool-call"}
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_tool",
+          "seq": 2,
+          "event": {
+            "type": "tool-call-delta",
+            "index": 0,
+            "callId": "call_conformance",
+            "name": "conformance.echo",
+            "argumentsDelta": "{\"value\":42}"
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_tool",
+          "seq": 3,
+          "event": {
+            "type": "block-end",
+            "index": 0,
+            "block": {
+              "type": "tool-call",
+              "id": "call_conformance",
+              "name": "conformance.echo",
+              "argumentsJson": "{\"value\":42}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "method": "llm.event",
+        "params": {
+          "streamId": "str_tool",
+          "seq": 4,
+          "event": {"type": "finish", "reason": "completed"}
+        }
+      }
+    }
+  ]
+}

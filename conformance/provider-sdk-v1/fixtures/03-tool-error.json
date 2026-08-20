@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "name": "tool-error",
+  "description": "A Tool handler can return an authoritative provider-level error outcome.",
+  "steps": [
+    {
+      "send": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_error",
+        "method": "tool.invoke",
+        "params": {
+          "operationId": "inv_error",
+          "invocationId": "inv_error",
+          "callId": "call_error",
+          "sessionId": "ses_conformance",
+          "tool": "conformance.fail",
+          "argumentsJson": "{}",
+          "attempt": 1,
+          "idempotencyKey": "idem_error"
+        }
+      }
+    },
+    {
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": "rpc_tool_error",
+        "result": {
+          "outcome": {
+            "kind": "error",
+            "code": "CONFORMANCE_ERROR",
+            "message": "requested failure",
+            "content": []
+          }
+        }
+      }
+    }
+  ]
+}
