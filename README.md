@@ -890,3 +890,104 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 See `FIX-NOTE.md` for the rationale.
+
+# Harness API Batch 09
+
+**Baseline:** `denislov/harness` main commit `83a91e2a3481d9ea92cae6bcb9780b86b876a396`
+
+Batch 09 adds the first explicit Agent control surface after the LLM/Tool vertical slice:
+
+- durable Tool approval request/resolution;
+- active LLM/Tool cancellation convergence;
+- Core-owned LLM and Tool attempt timeouts;
+- stale completion protection after cancel/timeout races.
+
+No Provider Protocol or out-of-process provider implementation is introduced in this batch.
+
+## Apply
+
+From the extracted bundle:
+
+```bash
+./apply.sh /path/to/harness
+```
+
+`apply.py` verifies the Git blob SHA of every baseline file it touches. It stages every transformation in memory first and writes only after all SHA and text-anchor checks succeed.
+
+The package targets exactly the baseline commit above. If your repository has moved since that commit, do not force the patch; sync or inspect the delta first.
+
+## Acceptance
+
+Run all four commands:
+
+```bash
+cargo fmt --all
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Batch 09 is accepted only when all four pass.
+
+## Main durable flow
+
+Approval:
+
+```text
+assistant/message
+  -> tool/call
+  -> policy ask
+  -> approval/requested
+  -> AwaitingApproval
+  -> approval/resolved(allow|deny)
+     allow -> tool/dispatched -> Tool future
+     deny  -> tool/result(denied)
+```
+
+Model cancellation:
+
+```text
+model/requested
+  -> Cancel
+  -> model/failed(CANCELLED)
+  -> step/ended(cancelled)
+  -> turn/ended(cancelled)
+  -> abort process-local model task
+```
+
+Non-idempotent Tool timeout/cancellation after dispatch:
+
+```text
+tool/dispatched
+  -> timeout/cancel ambiguity
+  -> recovery/blocked
+  -> step/ended(blocked)
+  -> turn/ended(blocked)
+```
+
+## Important semantics
+
+- `PolicyDecision::Ask` is no longer converted into a synthetic denial.
+- Approval is durable, so process restart does not lose a pending approval or require re-approval after a durable allow resolution.
+- A successful `resolve_approval()` acknowledgement means `approval/resolved` is already committed.
+- A successful `cancel()` acknowledgement means its durable convergence batch has committed before the live Tokio task is aborted.
+- `keep_inbox=false` durably discards pending unclaimed Inbox items; `keep_inbox=true` preserves them.
+- LLM timeout defaults to `120_000 ms` and can be overridden with `AgentLlmRuntime::with_timeout_ms`.
+- Tool timeout uses `ToolDefinition.default_timeout_ms` per provider attempt.
+- The Tokio runtime hosting `harness-agent` must have its time driver enabled because Batch 09 uses `tokio::time::timeout`.
+- Timeout/cancellation after `tool/dispatched` does not erase side-effect uncertainty.
+- Completions that arrive after their durable request/call is already terminal are treated as stale and ignored before matching against a newer live operation.
+
+## Spec
+
+The batch adds a focused normative amendment:
+
+```text
+spec/batch-09-control-and-approval.md
+```
+
+The existing main v0.1 spec files are intentionally not rewritten again in this batch. A later pre-Provider-Protocol consolidation should fold the amendment into the main specifications.
+
+## Validation note
+
+The generation environment used for this package does not contain a Rust toolchain, and its container network cannot install one. The package was checked for Python/apply-script syntax, shell syntax, TOML parsing, Rust delimiter structure, patch-anchor uniqueness, and package integrity, but the authoritative Rust compile/test/clippy result is your local acceptance run above.

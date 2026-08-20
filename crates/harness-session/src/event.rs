@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use harness_types::{
-    BlobRef, EventId, EventSeq, IdempotencyKey, InboxTarget, InvocationId, Message, MessageId,
-    PortableError, ProviderId, RequestId, SessionId, SideEffectClass, StepNo, Timestamp,
-    TokenUsage, ToolCallId, ToolOutcome, TurnNo,
+    ApprovalDecision, ApprovalId, BlobRef, EventId, EventSeq, IdempotencyKey, InboxTarget,
+    InvocationId, Message, MessageId, PortableError, ProviderId, RequestId, SessionId,
+    SideEffectClass, StepNo, Timestamp, TokenUsage, ToolCallId, ToolOutcome, TurnNo,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -238,6 +238,10 @@ pub enum SessionEventPayload {
     AssistantMessage(AssistantMessage),
     #[serde(rename = "tool/call")]
     ToolCall(ToolCallRecorded),
+    #[serde(rename = "approval/requested")]
+    ApprovalRequested(ApprovalRequested),
+    #[serde(rename = "approval/resolved")]
+    ApprovalResolved(ApprovalResolved),
     #[serde(rename = "tool/dispatched")]
     ToolDispatched(ToolDispatched),
     #[serde(rename = "tool/result")]
@@ -333,6 +337,25 @@ pub struct ToolCallRecorded {
     pub tool: String,
     pub arguments_json: harness_types::JsonText,
     pub side_effect: SideEffectClass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequested {
+    pub approval_id: ApprovalId,
+    pub call_id: ToolCallId,
+    pub reason: String,
+    pub risk: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalResolved {
+    pub approval_id: ApprovalId,
+    pub call_id: ToolCallId,
+    pub decision: ApprovalDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Durable provider-dispatch boundary for a concrete Tool attempt.
@@ -500,6 +523,8 @@ fn validate_event_shape(
         | SessionEventPayload::ModelFailed(_)
         | SessionEventPayload::AssistantMessage(_)
         | SessionEventPayload::ToolCall(_)
+        | SessionEventPayload::ApprovalRequested(_)
+        | SessionEventPayload::ApprovalResolved(_)
         | SessionEventPayload::ToolDispatched(_)
         | SessionEventPayload::ToolResult(_)
         | SessionEventPayload::StepEnded(_) => {
@@ -555,6 +580,8 @@ impl SessionEventPayload {
             Self::ModelFailed(data) => map.serialize_entry("data", data),
             Self::AssistantMessage(data) => map.serialize_entry("data", data),
             Self::ToolCall(data) => map.serialize_entry("data", data),
+            Self::ApprovalRequested(data) => map.serialize_entry("data", data),
+            Self::ApprovalResolved(data) => map.serialize_entry("data", data),
             Self::ToolDispatched(data) => map.serialize_entry("data", data),
             Self::ToolResult(data) => map.serialize_entry("data", data),
             Self::StepEnded(data) => map.serialize_entry("data", data),
@@ -579,6 +606,8 @@ impl SessionEventPayload {
             Self::ModelFailed(_) => "model/failed",
             Self::AssistantMessage(_) => "assistant/message",
             Self::ToolCall(_) => "tool/call",
+            Self::ApprovalRequested(_) => "approval/requested",
+            Self::ApprovalResolved(_) => "approval/resolved",
             Self::ToolDispatched(_) => "tool/dispatched",
             Self::ToolResult(_) => "tool/result",
             Self::StepEnded(_) => "step/ended",

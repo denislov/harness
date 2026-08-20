@@ -1,9 +1,11 @@
-use harness_types::{AgentInstanceId, CancelCause, InboxTarget, Message, SessionId};
+use harness_types::{
+    AgentInstanceId, ApprovalDecision, ApprovalId, CancelCause, InboxTarget, Message, SessionId,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    AgentCommand, AgentCommandAck, AgentHandleError, AgentState, LlmCompletion, SendReceipt,
-    ToolCompletion,
+    AgentCommand, AgentCommandAck, AgentHandleError, AgentState, ApprovalReceipt, LlmCompletion,
+    SendReceipt, ToolCompletion,
 };
 
 pub(crate) enum MailboxMessage {
@@ -19,10 +21,6 @@ pub(crate) enum MailboxMessage {
 }
 
 /// Cloneable application-facing handle for one live Agent actor.
-///
-/// The handle never exposes mutable Agent state. All writes are serialized by
-/// the actor mailbox. A successful command acknowledgement is the boundary at
-/// which the caller may rely on the corresponding durable mutation.
 #[derive(Clone)]
 pub struct AgentHandle {
     instance_id: AgentInstanceId,
@@ -110,6 +108,21 @@ impl AgentHandle {
     ) -> Result<(), AgentHandleError> {
         match self.submit(AgentCommand::cancel(cause, keep_inbox)).await? {
             AgentCommandAck::Cancelled => Ok(()),
+            _ => Err(AgentHandleError::AcknowledgementMismatch),
+        }
+    }
+
+    pub async fn resolve_approval(
+        &self,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        note: Option<String>,
+    ) -> Result<ApprovalReceipt, AgentHandleError> {
+        match self
+            .submit(AgentCommand::resolve_approval(approval_id, decision, note))
+            .await?
+        {
+            AgentCommandAck::ApprovalResolved(receipt) => Ok(receipt),
             _ => Err(AgentHandleError::AcknowledgementMismatch),
         }
     }

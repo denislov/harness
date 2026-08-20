@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use futures_util::stream;
@@ -15,8 +16,8 @@ use harness_session::{CreateSession, SessionCreated, SessionEventPayload, Sessio
 use harness_storage::BlobStore;
 use harness_storage_local::{MemoryBlobStore, MemorySessionStore};
 use harness_types::{
-    AgentInstanceId, ContentBlock, ErrorCode, EventId, EventSeq, Message, MessageId, MessageSource,
-    PortableError, ProviderId, Role, SessionId, StreamSeq, Timestamp,
+    AgentInstanceId, CancelCause, ContentBlock, ErrorCode, EventId, EventSeq, Message, MessageId,
+    MessageSource, PortableError, ProviderId, Role, SessionId, StreamSeq, Timestamp,
 };
 
 use crate::{
@@ -362,6 +363,118 @@ async fn stream_protocol_violation_becomes_durable_model_failure() {
         event.payload(),
         SessionEventPayload::ModelFailed(data)
             if data.failure.code == ErrorCode::ProviderProtocolError
+    )));
+
+    spawned.handle.shutdown().await.unwrap();
+    spawned.task.join().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_pending_model_is_durable_and_discards_future_inbox() {
+    let session_id: SessionId = id("ses_llm_cancel");
+    let provider_id: ProviderId = id("prv_cancel");
+    let store = create_store(&session_id).await;
+    let runtime = AgentLlmRuntime::new(
+        model_config(provider_id.clone()),
+        Arc::new(PendingLlm { provider_id }),
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap();
+    let spawned = spawn_agent_with_llm(
+        id("agt_llm_cancel"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(400)),
+        runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    spawned
+        .handle
+        .followup(user_message("msg_cancel_primary", "work"))
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| state.active_operation.is_some()).await;
+    spawned
+        .handle
+        .followup(user_message("msg_cancel_future", "later"))
+        .await
+        .unwrap();
+    spawned
+        .handle
+        .cancel(CancelCause::User, false)
+        .await
+        .unwrap();
+
+    let state = wait_for_state(&spawned.handle, |state| {
+        state.active_operation.is_none() && state.projection.lifecycle.open_turn.is_none()
+    })
+    .await;
+    assert!(state.projection.inbox.is_empty());
+    let events = store.read(&session_id, EventSeq::FIRST, 64).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::ModelFailed(data) if data.failure.code == ErrorCode::Cancelled
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::InboxDiscarded(data)
+            if data.message_id.as_str() == "msg_cancel_future"
+    )));
+
+    spawned.handle.shutdown().await.unwrap();
+    spawned.task.join().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_timeout_becomes_deadline_exceeded_failure() {
+    let session_id: SessionId = id("ses_llm_timeout");
+    let provider_id: ProviderId = id("prv_timeout");
+    let store = create_store(&session_id).await;
+    let runtime = AgentLlmRuntime::new(
+        model_config(provider_id.clone()),
+        Arc::new(PendingLlm { provider_id }),
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap()
+    .with_timeout_ms(100)
+    .unwrap();
+    let spawned = spawn_agent_with_llm(
+        id("agt_llm_timeout"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(500)),
+        runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    spawned
+        .handle
+        .followup(user_message("msg_timeout", "wait forever"))
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| {
+        matches!(
+            state.active_operation,
+            Some(ActiveAgentOperation::Model { .. })
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_for_state(&spawned.handle, |state| {
+        state.active_operation.is_none() && state.projection.lifecycle.open_turn.is_none()
+    })
+    .await;
+
+    let events = store.read(&session_id, EventSeq::FIRST, 64).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::ModelFailed(data)
+            if data.failure.code == ErrorCode::DeadlineExceeded
     )));
 
     spawned.handle.shutdown().await.unwrap();

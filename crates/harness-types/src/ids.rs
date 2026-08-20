@@ -96,6 +96,7 @@ define_identifier!(MessageId, "MessageId");
 define_identifier!(RequestId, "RequestId");
 define_identifier!(ToolCallId, "ToolCallId");
 define_identifier!(InvocationId, "InvocationId");
+define_identifier!(ApprovalId, "ApprovalId");
 define_identifier!(IdempotencyKey, "IdempotencyKey");
 define_identifier!(ProviderId, "ProviderId");
 define_identifier!(BlobId, "BlobId");

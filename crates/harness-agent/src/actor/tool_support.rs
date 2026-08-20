@@ -1,9 +1,9 @@
 use harness_session::{
-    NewSessionEvent, SessionEventPayload, SessionStore, StepEndReason, StepEnded, StepPosition,
-    ToolDispatched, ToolResultRecorded,
+    ApprovalRequested, NewSessionEvent, SessionEventPayload, SessionStore, StepEndReason,
+    StepEnded, StepPosition, ToolDispatched, ToolResultRecorded,
 };
 use harness_tools::{ToolInvocation, ToolInvocationPosition};
-use harness_types::{IdempotencyKey, InvocationId, ToolCallId, ToolOutcome};
+use harness_types::{ApprovalId, IdempotencyKey, InvocationId, ToolCallId, ToolOutcome};
 use tokio::sync::mpsc;
 
 use super::AgentActor;
@@ -44,6 +44,28 @@ impl AgentActor {
                     })
                     .collect();
                 self.append_validated(store, drafts).await?;
+                Ok(ToolAdvance::Progressed)
+            }
+            ToolDriverPlan::RequestApproval {
+                position,
+                call_id,
+                reason,
+                risk,
+            } => {
+                let event_id = event_source.next_event_id();
+                let approval_id = approval_id_from_event(&event_id)?;
+                let draft = NewSessionEvent::new(
+                    event_id,
+                    event_source.now(),
+                    SessionEventPayload::ApprovalRequested(ApprovalRequested {
+                        approval_id,
+                        call_id,
+                        reason,
+                        risk,
+                    }),
+                )
+                .in_step(position.turn, position.step);
+                self.append_validated(store, vec![draft]).await?;
                 Ok(ToolAdvance::Progressed)
             }
             ToolDriverPlan::CompleteWithoutDispatch {
@@ -140,6 +162,7 @@ impl AgentActor {
                     registration.executor().clone(),
                     invocation,
                     position,
+                    registration.definition().default_timeout_ms,
                     self_tx.clone(),
                 ));
                 Ok(ToolAdvance::Started)
@@ -166,6 +189,18 @@ impl AgentActor {
         event_source: &dyn AgentEventSource,
         completion: ToolCompletion,
     ) -> Result<(), AgentError> {
+        // A completion that no longer owns a durable pending ToolCall is stale.
+        // This check intentionally precedes live-operation matching so an old
+        // completion cannot kill a newer model or Tool operation after cancel.
+        if !self
+            .state
+            .projection
+            .pending_tool_calls
+            .contains_key(&completion.call_id)
+        {
+            return Ok(());
+        }
+
         let Some(ActiveAgentOperation::Tool {
             position,
             call_id,
@@ -173,10 +208,9 @@ impl AgentActor {
             attempt: _,
         }) = self.state.active_operation.clone()
         else {
-            return Err(AgentError::UnexpectedToolCompletion {
-                call_id: completion.call_id,
-                message: "no Tool operation is active".to_owned(),
-            });
+            return self
+                .handle_stale_tool_completion(store, event_source, completion)
+                .await;
         };
 
         if position != completion.position
@@ -207,14 +241,57 @@ impl AgentActor {
                 self.append_validated(store, vec![draft]).await?;
             }
             Ok(_) | Err(_) => {
-                // No terminal SessionEvent is fabricated for an ambiguous provider
-                // outcome. After the live operation overlay is removed,
-                // RecoveryAnalyzer regains authority over the durable dispatch.
+                // Ambiguous completion: durable dispatch remains authoritative and
+                // RecoveryAnalyzer decides retry versus blocking after the live
+                // operation overlay is removed.
             }
         }
 
         self.state.active_operation = None;
         let _ = self.active_tool_task.take();
+        Ok(())
+    }
+
+    async fn handle_stale_tool_completion(
+        &mut self,
+        store: &dyn SessionStore,
+        event_source: &dyn AgentEventSource,
+        completion: ToolCompletion,
+    ) -> Result<(), AgentError> {
+        let Some(block) = self.state.projection.unresolved_recovery.as_ref() else {
+            return Err(AgentError::UnexpectedToolCompletion {
+                call_id: completion.call_id,
+                message: "no Tool operation is active but the logical call is still pending"
+                    .to_owned(),
+            });
+        };
+        if block.data.call_id != completion.call_id
+            || block.data.invocation_id != completion.invocation_id
+            || block.turn != completion.position.turn
+            || block.step != completion.position.step
+        {
+            return Err(AgentError::UnexpectedToolCompletion {
+                call_id: completion.call_id,
+                message: "stale Tool completion does not match the active recovery block"
+                    .to_owned(),
+            });
+        }
+
+        if let Ok(outcome) = completion.outcome
+            && !matches!(&outcome, ToolOutcome::Unknown { .. })
+        {
+            let draft = NewSessionEvent::new(
+                event_source.next_event_id(),
+                event_source.now(),
+                SessionEventPayload::ToolResult(ToolResultRecorded {
+                    call_id: completion.call_id,
+                    invocation_id: completion.invocation_id,
+                    outcome,
+                }),
+            )
+            .in_step(completion.position.turn, completion.position.step);
+            self.append_validated(store, vec![draft]).await?;
+        }
         Ok(())
     }
 
@@ -231,10 +308,20 @@ impl AgentActor {
     }
 }
 
-fn invocation_id_from_event(event_id: &harness_types::EventId) -> Result<InvocationId, AgentError> {
+pub(super) fn invocation_id_from_event(
+    event_id: &harness_types::EventId,
+) -> Result<InvocationId, AgentError> {
     InvocationId::new(format!("inv:tool:{event_id}")).map_err(|error| {
         AgentError::InvalidToolRuntime {
             message: format!("failed to derive InvocationId from EventId: {error}"),
+        }
+    })
+}
+
+fn approval_id_from_event(event_id: &harness_types::EventId) -> Result<ApprovalId, AgentError> {
+    ApprovalId::new(format!("apr:tool:{event_id}")).map_err(|error| {
+        AgentError::InvalidToolRuntime {
+            message: format!("failed to derive ApprovalId from EventId: {error}"),
         }
     })
 }

@@ -5,11 +5,14 @@ use harness_storage::BlobStore;
 use harness_types::ProviderId;
 use thiserror::Error;
 
+pub const DEFAULT_LLM_TIMEOUT_MS: u64 = 120_000;
+
 #[derive(Clone)]
 pub struct AgentLlmRuntime {
     request_config: ModelRequestConfig,
     provider: Arc<dyn LlmProvider>,
     blob_store: Arc<dyn BlobStore>,
+    timeout_ms: u64,
 }
 
 impl AgentLlmRuntime {
@@ -31,7 +34,16 @@ impl AgentLlmRuntime {
             request_config,
             provider,
             blob_store,
+            timeout_ms: DEFAULT_LLM_TIMEOUT_MS,
         })
+    }
+
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Result<Self, AgentLlmRuntimeError> {
+        if timeout_ms == 0 {
+            return Err(AgentLlmRuntimeError::ZeroTimeout);
+        }
+        self.timeout_ms = timeout_ms;
+        Ok(self)
     }
 
     pub const fn request_config(&self) -> &ModelRequestConfig {
@@ -44,6 +56,10 @@ impl AgentLlmRuntime {
 
     pub fn blob_store(&self) -> &Arc<dyn BlobStore> {
         &self.blob_store
+    }
+
+    pub const fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
     }
 }
 
@@ -58,4 +74,7 @@ pub enum AgentLlmRuntimeError {
         configured: ProviderId,
         actual: ProviderId,
     },
+
+    #[error("LLM timeout must be greater than zero milliseconds")]
+    ZeroTimeout,
 }

@@ -19,13 +19,10 @@ pub enum AgentPhase {
 pub enum AgentDriverBoundary {
     ReadyForModel { position: StepPosition },
     ReadyForTools { position: StepPosition },
+    AwaitingApproval { position: StepPosition },
 }
 
 /// Process-local external operation owned by the live actor.
-///
-/// This state is deliberately not durable. If the process disappears, durable
-/// `model/requested` / `tool/dispatched` facts are interpreted by
-/// `RecoveryAnalyzer` instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActiveAgentOperation {
@@ -63,11 +60,7 @@ pub struct AgentState {
     pub gate: ExecutionGate,
     pub resume: ResumeDecision,
     pub projection: SessionProjection,
-
-    /// Process-local operation currently crossing an external capability seam.
     pub active_operation: Option<ActiveAgentOperation>,
-
-    /// Process-local wake latch derived from durable pending Inbox items.
     pub wake_requested: bool,
 }
 
@@ -121,8 +114,6 @@ impl AgentState {
         self.active_operation.is_some()
     }
 
-    /// Returns the external-operation boundary at which the deterministic actor
-    /// driver is currently parked.
     pub fn driver_boundary(&self) -> Option<AgentDriverBoundary> {
         if self.active_operation.is_some() {
             return None;
@@ -142,6 +133,11 @@ impl AgentState {
         };
 
         match &self.resume {
+            ResumeDecision::AwaitingApproval { position, .. } if *position == live_position => {
+                Some(AgentDriverBoundary::AwaitingApproval {
+                    position: *position,
+                })
+            }
             ResumeDecision::ContinueOpenStep { position } if *position == live_position => {
                 if self.projection.open_step_assistant_message.is_none() {
                     Some(AgentDriverBoundary::ReadyForModel {

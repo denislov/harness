@@ -827,3 +827,71 @@ SessionProjector reconstructs open-step ToolCall order plus recorded/completed s
 ## 11. Spec housekeeping
 
 The Batch 07 additions had duplicated section/invariant numbers in `agent-lifecycle.md` and `invariants.md`. Batch 08 renumbers those appendices before adding new Tool sections; this is editorial and does not change Batch 07 semantics.
+
+# Batch 09 Spec Delta
+
+## D-01 — Approval is durable state
+
+A Tool policy `ask` decision creates `approval/requested`. `ApprovalId` is unique within one Session. The Agent parks until a matching `approval/resolved` is committed.
+
+Rationale: approval state affects authorization and execution ordering, so it must survive process restart and be replayable from Session history.
+
+## D-02 — Durable approval resolution is authoritative
+
+`approval/resolved(allow)` authorizes the same logical ToolCall after restart without re-running an interactive approval prompt. `approval/resolved(deny)` is monotonic and may never be followed by `tool/dispatched` for that call.
+
+## D-03 — Approval is a driver boundary, not an Agent phase
+
+The live phase remains `Running`. Approval waiting is expressed through:
+
+```text
+ResumeDecision::AwaitingApproval
+AgentDriverBoundary::AwaitingApproval
+```
+
+No external capability future is owned at this boundary.
+
+## D-04 — Cancellation acknowledgement is a durable boundary
+
+The actor builds and commits its cancellation convergence batch before aborting the process-local LLM/Tool task. If the append fails, cancellation is not acknowledged and the live operation remains owned.
+
+This prevents a successful API acknowledgement from representing only a best-effort task abort with no durable terminal state.
+
+## D-05 — Cancellation preserves Tool side-effect uncertainty
+
+After `tool/dispatched`:
+
+```text
+read-only            -> terminal cancelled result is permitted
+idempotent-write     -> terminal unknown result when caller stops retrying
+non-idempotent-write -> recovery/blocked
+```
+
+The non-idempotent path never treats task cancellation as proof that the external mutation did not occur.
+
+## D-06 — Inbox retention is explicit
+
+`Cancel { keep_inbox: false }` emits `inbox/discarded` for every pending unclaimed next-turn and next-step item. `keep_inbox: true` leaves those events pending.
+
+## D-07 — Core owns attempt timeout
+
+LLM and Tool provider attempts are wrapped by the Rust Core runtime timeout layer.
+
+```text
+LLM: AgentLlmRuntime.timeout_ms
+Tool: ToolDefinition.default_timeout_ms
+```
+
+Tool timeout is an ambiguous provider-attempt failure after `tool/dispatched`, so existing recovery logic decides retry/block behavior. The Tokio runtime hosting `harness-agent` must enable the Tokio time driver.
+
+## D-08 — Stale completions are filtered by durable eligibility first
+
+A completion may race with cancellation/timeout and remain queued after a later operation starts. Therefore completion handling first checks whether the referenced durable request/call is still pending. Already-terminal completions are ignored before comparing them with the current process-local `ActiveAgentOperation`.
+
+## D-09 — Sequential approval constraint
+
+The v0.1 sequential Tool scheduler permits at most one pending approval and does not allow `approval/requested` to coexist with an unresolved `tool/dispatched` attempt. This keeps authorization recovery deterministic before parallel Tool execution is introduced.
+
+## D-10 — Main spec consolidation deferred
+
+Batch 09 adds `spec/batch-09-control-and-approval.md` as a normative amendment rather than rewriting the existing main spec set. The amendment should be folded into the v0.1 consolidated specs before the Provider Protocol implementation is frozen.

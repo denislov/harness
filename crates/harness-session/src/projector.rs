@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use harness_types::{
-    CancelCause, ContentBlock, EventId, EventSeq, InboxTarget, InvocationId, JsonText, Message,
-    MessageId, MessageSource, ProviderId, Role, SideEffectClass, StepNo, ToolCallId, ToolOutcome,
-    TurnNo,
+    ApprovalDecision, ApprovalId, CancelCause, ContentBlock, EventId, EventSeq, InboxTarget,
+    InvocationId, JsonText, Message, MessageId, MessageSource, ProviderId, Role, SideEffectClass,
+    StepNo, ToolCallId, ToolOutcome, TurnNo,
 };
 use thiserror::Error;
 
 use crate::{
-    ModelRequested, RecoveryBlocked, SessionEvent, SessionEventPayload, StepEndReason,
-    ToolCallRecorded, ToolDispatched, TurnEndReason,
+    ApprovalRequested, ApprovalResolved, ModelRequested, RecoveryBlocked, SessionEvent,
+    SessionEventPayload, StepEndReason, ToolCallRecorded, ToolDispatched, TurnEndReason,
 };
 
 pub const SESSION_PROJECTION_VERSION_V1: u16 = 1;
@@ -81,6 +81,22 @@ pub struct PendingToolDispatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub request_event_id: EventId,
+    pub request_seq: EventSeq,
+    pub turn: TurnNo,
+    pub step: StepNo,
+    pub data: ApprovalRequested,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolApprovalResolution {
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenStepToolCall {
     pub call_id: ToolCallId,
     pub name: String,
@@ -93,6 +109,7 @@ pub struct OpenStepToolProjection {
     pub announced: Vec<OpenStepToolCall>,
     pub recorded: BTreeSet<ToolCallId>,
     pub completed: BTreeSet<ToolCallId>,
+    pub approvals: BTreeMap<ToolCallId, ToolApprovalResolution>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -104,6 +121,7 @@ pub struct SessionProjection {
     pub open_step_tools: OpenStepToolProjection,
     pub last_model_request: Option<ModelRequested>,
     pub pending_model_request: Option<ModelRequested>,
+    pub pending_approval: Option<PendingApproval>,
     pub pending_tool_calls: BTreeMap<ToolCallId, PendingToolCall>,
     pub pending_tool_dispatches: BTreeMap<ToolCallId, PendingToolDispatch>,
     pub unresolved_recovery: Option<RecoveryBlock>,
@@ -165,6 +183,7 @@ struct ProjectorState {
     seen_tool_calls: BTreeSet<ToolCallId>,
     invocation_owners: BTreeMap<InvocationId, ToolCallId>,
     terminal_invocations: BTreeSet<InvocationId>,
+    seen_approval_ids: BTreeSet<ApprovalId>,
     current_step_assistant_seen: bool,
     current_step_announced_calls: BTreeMap<ToolCallId, AnnouncedToolCall>,
     current_step_recorded_calls: BTreeSet<ToolCallId>,
@@ -270,6 +289,7 @@ impl ProjectorState {
                 self.projection.lifecycle.last_started_step = Some(position);
                 self.current_step_assistant_seen = false;
                 self.projection.open_step_assistant_message = None;
+                self.projection.pending_approval = None;
                 self.projection.open_step_tools = OpenStepToolProjection::default();
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
@@ -364,6 +384,12 @@ impl ProjectorState {
                 Ok(())
             }
             SessionEventPayload::ToolCall(data) => self.apply_tool_call(event, data),
+            SessionEventPayload::ApprovalRequested(data) => {
+                self.apply_approval_requested(event, data)
+            }
+            SessionEventPayload::ApprovalResolved(data) => {
+                self.apply_approval_resolved(event, data)
+            }
             SessionEventPayload::ToolDispatched(data) => self.apply_tool_dispatched(event, data),
             SessionEventPayload::ToolResult(data) => self.apply_tool_result(event, data),
             SessionEventPayload::StepEnded(data) => {
@@ -371,6 +397,12 @@ impl ProjectorState {
                 if self.projection.pending_model_request.is_some() {
                     return self
                         .invalid(event, "step/ended encountered with a pending model request");
+                }
+                if self.projection.pending_approval.is_some() {
+                    return self.invalid(
+                        event,
+                        "step/ended encountered while a Tool approval is still pending",
+                    );
                 }
 
                 for call_id in self.current_step_announced_calls.keys() {
@@ -421,6 +453,7 @@ impl ProjectorState {
                 self.projection.lifecycle.last_ended_step_reason = Some(data.reason);
                 self.current_step_assistant_seen = false;
                 self.projection.open_step_assistant_message = None;
+                self.projection.pending_approval = None;
                 self.projection.open_step_tools = OpenStepToolProjection::default();
                 self.current_step_announced_calls.clear();
                 self.current_step_recorded_calls.clear();
@@ -553,6 +586,96 @@ impl ProjectorState {
         Ok(())
     }
 
+    fn apply_approval_requested(
+        &mut self,
+        event: &SessionEvent,
+        data: &ApprovalRequested,
+    ) -> Result<(), ProjectionError> {
+        let position = self.require_open_step(event)?;
+        if self.projection.pending_approval.is_some() {
+            return self.invalid(event, "another Tool approval is already pending");
+        }
+        if !self.seen_approval_ids.insert(data.approval_id.clone()) {
+            return self.invalid(event, "approvalId appears more than once in the Session");
+        }
+        let pending = self
+            .projection
+            .pending_tool_calls
+            .get(&data.call_id)
+            .ok_or_else(|| ProjectionError::MissingToolCall(data.call_id.clone()))?;
+        if pending.turn != position.turn || pending.step != position.step {
+            return self.invalid(event, "approval/requested call is outside the open step");
+        }
+        if !self.projection.pending_tool_dispatches.is_empty() {
+            return self.invalid(
+                event,
+                "approval/requested may not coexist with an unresolved tool/dispatched attempt in the sequential v0.1 scheduler",
+            );
+        }
+        if self
+            .projection
+            .open_step_tools
+            .approvals
+            .contains_key(&data.call_id)
+        {
+            return self.invalid(event, "ToolCall already has a durable approval resolution");
+        }
+
+        self.projection.pending_approval = Some(PendingApproval {
+            request_event_id: event.event_id().clone(),
+            request_seq: event.seq(),
+            turn: position.turn,
+            step: position.step,
+            data: data.clone(),
+        });
+        Ok(())
+    }
+
+    fn apply_approval_resolved(
+        &mut self,
+        event: &SessionEvent,
+        data: &ApprovalResolved,
+    ) -> Result<(), ProjectionError> {
+        let position = self.require_open_step(event)?;
+        let pending =
+            self.projection.pending_approval.as_ref().ok_or_else(|| {
+                invalid_event_at(event, "approval/resolved has no pending approval")
+            })?;
+        if pending.turn != position.turn || pending.step != position.step {
+            return self.invalid(
+                event,
+                "approval/resolved is outside the pending approval step",
+            );
+        }
+        if pending.data.approval_id != data.approval_id || pending.data.call_id != data.call_id {
+            return self.invalid(
+                event,
+                "approval/resolved does not match the pending approval",
+            );
+        }
+        if self
+            .projection
+            .pending_tool_dispatches
+            .contains_key(&data.call_id)
+        {
+            return self.invalid(
+                event,
+                "approval/resolved may not occur after tool/dispatched",
+            );
+        }
+
+        self.projection.open_step_tools.approvals.insert(
+            data.call_id.clone(),
+            ToolApprovalResolution {
+                approval_id: data.approval_id.clone(),
+                decision: data.decision,
+                note: data.note.clone(),
+            },
+        );
+        self.projection.pending_approval = None;
+        Ok(())
+    }
+
     fn apply_tool_call(
         &mut self,
         event: &SessionEvent,
@@ -613,6 +736,26 @@ impl ProjectorState {
         data: &ToolDispatched,
     ) -> Result<(), ProjectionError> {
         let position = self.require_open_step(event)?;
+        if self
+            .projection
+            .pending_approval
+            .as_ref()
+            .is_some_and(|approval| approval.data.call_id == data.call_id)
+        {
+            return self.invalid(
+                event,
+                "tool/dispatched encountered while approval is pending",
+            );
+        }
+        if self
+            .projection
+            .open_step_tools
+            .approvals
+            .get(&data.call_id)
+            .is_some_and(|resolution| resolution.decision == ApprovalDecision::Deny)
+        {
+            return self.invalid(event, "tool/dispatched encountered after approval denial");
+        }
         if self.projection.unresolved_recovery.is_some() {
             return self.invalid(
                 event,
@@ -697,6 +840,14 @@ impl ProjectorState {
         event: &SessionEvent,
         data: &crate::ToolResultRecorded,
     ) -> Result<(), ProjectionError> {
+        if self
+            .projection
+            .pending_approval
+            .as_ref()
+            .is_some_and(|approval| approval.data.call_id == data.call_id)
+        {
+            return self.invalid(event, "tool/result encountered while approval is pending");
+        }
         let pending = self
             .projection
             .pending_tool_calls

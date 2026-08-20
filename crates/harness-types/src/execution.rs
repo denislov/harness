@@ -25,3 +25,10 @@ pub enum CancelCause {
     Shutdown,
     Disposed,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalDecision {
+    Allow,
+    Deny,
+}

@@ -23,13 +23,13 @@ mod tool_tests;
 
 pub use actor::{AgentActor, AgentExit, AgentExitReason};
 pub use bootstrap::{AgentBootstrap, AgentBootstrapError, AgentBootstrapper};
-pub use command::{AgentCommand, AgentCommandAck, SendReceipt};
+pub use command::{AgentCommand, AgentCommandAck, ApprovalReceipt, SendReceipt};
 pub use error::{AgentError, AgentHandleError};
 pub use event_source::AgentEventSource;
 pub use handle::AgentHandle;
 pub(crate) use handle::MailboxMessage;
 pub(crate) use llm_operation::LlmCompletion;
-pub use llm_runtime::{AgentLlmRuntime, AgentLlmRuntimeError};
+pub use llm_runtime::{AgentLlmRuntime, AgentLlmRuntimeError, DEFAULT_LLM_TIMEOUT_MS};
 pub use recovery::{
     DurableCursor, RecoveryAnalysisError, RecoveryAnalyzer, RecoveryBlockProposal, ResumeDecision,
     ToolRecoveryAction, ToolRetryRequirement,

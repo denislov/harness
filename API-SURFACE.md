@@ -1217,3 +1217,170 @@ AgentActor::handle_tool_completion
 ```
 
 They are implementation seams, not stable application APIs yet.
+
+# Batch 09 Public API Surface
+
+## `harness-types`
+
+```rust
+pub struct ApprovalId(/* opaque string */);
+
+pub enum ApprovalDecision {
+    Allow,
+    Deny,
+}
+```
+
+`ApprovalId` follows the same non-empty opaque-ID contract as the existing Session/Request/Tool IDs.
+
+## `harness-session`
+
+New durable payloads:
+
+```rust
+pub struct ApprovalRequested {
+    pub approval_id: ApprovalId,
+    pub call_id: ToolCallId,
+    pub reason: String,
+    pub risk: String,
+}
+
+pub struct ApprovalResolved {
+    pub approval_id: ApprovalId,
+    pub call_id: ToolCallId,
+    pub decision: ApprovalDecision,
+    pub note: Option<String>,
+}
+```
+
+New event types:
+
+```text
+approval/requested
+approval/resolved
+```
+
+New projection values:
+
+```rust
+pub struct PendingApproval {
+    pub request_event_id: EventId,
+    pub request_seq: EventSeq,
+    pub turn: TurnNo,
+    pub step: StepNo,
+    pub data: ApprovalRequested,
+}
+
+pub struct ToolApprovalResolution {
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
+    pub note: Option<String>,
+}
+```
+
+`SessionProjection` adds:
+
+```rust
+pub pending_approval: Option<PendingApproval>
+```
+
+`OpenStepToolProjection` adds:
+
+```rust
+pub approvals: BTreeMap<ToolCallId, ToolApprovalResolution>
+```
+
+## `harness-agent`
+
+### Commands and acknowledgements
+
+```rust
+pub enum AgentCommand {
+    // existing Send / Cancel / Shutdown ...
+    ResolveApproval {
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        note: Option<String>,
+    },
+}
+
+pub struct ApprovalReceipt {
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
+    pub event_id: EventId,
+    pub seq: EventSeq,
+}
+
+pub enum AgentCommandAck {
+    Send(SendReceipt),
+    Cancelled,
+    ApprovalResolved(ApprovalReceipt),
+    Shutdown,
+}
+```
+
+### Handle
+
+```rust
+impl AgentHandle {
+    pub async fn cancel(
+        &self,
+        cause: CancelCause,
+        keep_inbox: bool,
+    ) -> Result<(), AgentHandleError>;
+
+    pub async fn resolve_approval(
+        &self,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        note: Option<String>,
+    ) -> Result<ApprovalReceipt, AgentHandleError>;
+}
+```
+
+### LLM timeout
+
+```rust
+pub const DEFAULT_LLM_TIMEOUT_MS: u64 = 120_000;
+
+impl AgentLlmRuntime {
+    pub fn with_timeout_ms(self, timeout_ms: u64)
+        -> Result<Self, AgentLlmRuntimeError>;
+
+    pub const fn timeout_ms(&self) -> u64;
+}
+```
+
+Zero LLM timeout is rejected by `AgentLlmRuntimeError::ZeroTimeout`.
+
+### Recovery / driver state
+
+```rust
+pub enum ResumeDecision {
+    // existing variants ...
+    AwaitingApproval {
+        position: StepPosition,
+        approval: PendingApproval,
+    },
+}
+
+pub enum AgentDriverBoundary {
+    ReadyForModel { position: StepPosition },
+    ReadyForTools { position: StepPosition },
+    AwaitingApproval { position: StepPosition },
+}
+```
+
+`AwaitingApproval` is derived from durable projection and is not a new SessionEvent itself.
+
+## Internal execution changes
+
+The following remain crate-private implementation details:
+
+```text
+ToolDriverPlan::RequestApproval
+actor/control_support.rs
+spawn_llm_operation(..., timeout_ms, ...)
+spawn_tool_operation(..., timeout_ms, ...)
+stale LLM/Tool completion filtering
+```

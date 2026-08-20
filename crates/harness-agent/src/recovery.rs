@@ -1,6 +1,6 @@
 use harness_session::{
-    ModelRequested, PendingToolCall, PendingToolDispatch, RecoveryBlock, SessionProjection,
-    StepPosition,
+    ModelRequested, PendingApproval, PendingToolCall, PendingToolDispatch, RecoveryBlock,
+    SessionProjection, StepPosition,
 };
 use harness_types::{SideEffectClass, ToolCallId, TurnNo};
 use thiserror::Error;
@@ -59,6 +59,12 @@ pub enum ResumeDecision {
     /// continue/finalize that step before opening a new turn.
     ContinueOpenStep { position: StepPosition },
 
+    /// A durable Tool approval request is waiting for an explicit caller decision.
+    AwaitingApproval {
+        position: StepPosition,
+        approval: PendingApproval,
+    },
+
     /// `model/requested` was committed but neither assistant/message nor model/failed
     /// was committed. The future driver must first durably fail the interrupted attempt,
     /// then may create a new model attempt according to retry policy.
@@ -105,6 +111,21 @@ pub enum RecoveryAnalysisError {
     #[error("pending model request and pending tool calls coexist in one projection")]
     ModelAndToolWorkOverlap,
 
+    #[error("pending approval exists without an open step")]
+    ApprovalWithoutOpenStep,
+
+    #[error("pending approval and pending model request coexist in one projection")]
+    ApprovalAndModelOverlap,
+
+    #[error("pending approval and unresolved tool dispatch coexist in one projection")]
+    ApprovalAndDispatchOverlap,
+
+    #[error("pending approval does not belong to the open step")]
+    ApprovalOutsideOpenStep,
+
+    #[error("pending approval references missing tool call {0}")]
+    ApprovalWithoutTool(ToolCallId),
+
     #[error("pending tool work exists without an open step")]
     ToolWorkWithoutOpenStep,
 
@@ -135,6 +156,34 @@ impl RecoveryAnalyzer {
             return Ok(ResumeDecision::Blocked {
                 block: block.clone(),
                 cursor,
+            });
+        }
+
+        if let Some(approval) = &projection.pending_approval {
+            if projection.pending_model_request.is_some() {
+                return Err(RecoveryAnalysisError::ApprovalAndModelOverlap);
+            }
+            if !projection.pending_tool_dispatches.is_empty() {
+                return Err(RecoveryAnalysisError::ApprovalAndDispatchOverlap);
+            }
+            let position = projection
+                .lifecycle
+                .open_step
+                .ok_or(RecoveryAnalysisError::ApprovalWithoutOpenStep)?;
+            if approval.turn != position.turn || approval.step != position.step {
+                return Err(RecoveryAnalysisError::ApprovalOutsideOpenStep);
+            }
+            if !projection
+                .pending_tool_calls
+                .contains_key(&approval.data.call_id)
+            {
+                return Err(RecoveryAnalysisError::ApprovalWithoutTool(
+                    approval.data.call_id.clone(),
+                ));
+            }
+            return Ok(ResumeDecision::AwaitingApproval {
+                position,
+                approval: approval.clone(),
             });
         }
 

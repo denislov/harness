@@ -21,6 +21,7 @@ use crate::{
     MailboxMessage, RecoveryAnalyzer, ResumeDecision, SendReceipt,
 };
 
+mod control_support;
 mod tool_support;
 
 /// Single-owner process-local Agent actor state.
@@ -217,7 +218,8 @@ impl AgentActor {
                 DriverPlan::Park(boundary) => {
                     match boundary {
                         crate::AgentDriverBoundary::ReadyForModel { position }
-                        | crate::AgentDriverBoundary::ReadyForTools { position } => {
+                        | crate::AgentDriverBoundary::ReadyForTools { position }
+                        | crate::AgentDriverBoundary::AwaitingApproval { position } => {
                             self.state.phase = AgentPhase::Running {
                                 turn: position.turn,
                                 step: Some(position.step),
@@ -272,6 +274,7 @@ impl AgentActor {
                     .await?;
                     return Ok(());
                 }
+                Some(crate::AgentDriverBoundary::AwaitingApproval { .. }) => return Ok(()),
                 Some(crate::AgentDriverBoundary::ReadyForTools { position }) => {
                     let Some(tool_runtime) = tool_runtime else {
                         return Ok(());
@@ -363,6 +366,7 @@ impl AgentActor {
             llm_runtime.provider().clone(),
             request,
             position,
+            llm_runtime.timeout_ms(),
             self_tx.clone(),
         ));
         Ok(())
@@ -399,6 +403,19 @@ impl AgentActor {
         llm_runtime: Option<&AgentLlmRuntime>,
         completion: LlmCompletion,
     ) -> Result<(), AgentError> {
+        // Durable request ownership is checked before the process-local overlay.
+        // A completion for an already terminalized request is stale even when a
+        // newer model operation is currently active.
+        let completion_is_pending = self
+            .state
+            .projection
+            .pending_model_request
+            .as_ref()
+            .is_some_and(|request| request.request_id == completion.request_id);
+        if !completion_is_pending {
+            return Ok(());
+        }
+
         let Some(ActiveAgentOperation::Model {
             position,
             request_id,
@@ -407,7 +424,8 @@ impl AgentActor {
         else {
             return Err(AgentError::UnexpectedModelCompletion {
                 request_id: completion.request_id,
-                message: "no model operation is active".to_owned(),
+                message: "no live model operation owns the still-pending durable request"
+                    .to_owned(),
             });
         };
         if position != completion.position || request_id != completion.request_id {
@@ -691,7 +709,12 @@ impl AgentActor {
                     }
 
                     let result = self
-                        .handle_command(store.as_ref(), event_source.as_ref(), command)
+                        .handle_command(
+                            store.as_ref(),
+                            event_source.as_ref(),
+                            tool_runtime.as_ref(),
+                            command,
+                        )
                         .await;
                     let terminal = result
                         .as_ref()
@@ -741,10 +764,20 @@ impl AgentActor {
         }
     }
 
-    fn abort_active_tasks(&mut self) {
+    pub(super) fn abort_active_llm_task(&mut self) {
         if let Some(task) = self.active_llm_task.take() {
             task.abort();
         }
+        if matches!(
+            &self.state.active_operation,
+            Some(ActiveAgentOperation::Model { .. })
+        ) {
+            self.state.active_operation = None;
+        }
+    }
+
+    fn abort_active_tasks(&mut self) {
+        self.abort_active_llm_task();
         self.abort_active_tool_task();
         self.state.active_operation = None;
     }
@@ -753,6 +786,7 @@ impl AgentActor {
         &mut self,
         store: &dyn SessionStore,
         event_source: &dyn AgentEventSource,
+        tool_runtime: Option<&AgentToolRuntime>,
         command: AgentCommand,
     ) -> Result<AgentCommandAck, AgentError> {
         match command {
@@ -764,13 +798,19 @@ impl AgentActor {
                 .handle_send(store, event_source, message, target, wakeup)
                 .await
                 .map(AgentCommandAck::Send),
-            AgentCommand::Cancel {
-                cause: _,
-                keep_inbox: _,
-            } => Err(AgentError::UnsupportedOperation {
-                operation: "cancel",
-                reason: "active-operation cancellation and inbox discard convergence are introduced after the first LLM vertical slice",
-            }),
+            AgentCommand::Cancel { cause, keep_inbox } => {
+                self.handle_cancel(store, event_source, tool_runtime, cause, keep_inbox)
+                    .await?;
+                Ok(AgentCommandAck::Cancelled)
+            }
+            AgentCommand::ResolveApproval {
+                approval_id,
+                decision,
+                note,
+            } => self
+                .handle_resolve_approval(store, event_source, approval_id, decision, note)
+                .await
+                .map(AgentCommandAck::ApprovalResolved),
             AgentCommand::Shutdown => unreachable!("shutdown is handled before command dispatch"),
         }
     }

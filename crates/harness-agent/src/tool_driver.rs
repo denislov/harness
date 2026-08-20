@@ -1,6 +1,6 @@
 use harness_session::{PendingToolCall, StepPosition, ToolCallRecorded};
 use harness_tools::{IdempotencySupport, PolicyDecision, ToolPolicyInput, ToolRegistration};
-use harness_types::{IdempotencyKey, SideEffectClass, ToolCallId, ToolOutcome};
+use harness_types::{ApprovalDecision, IdempotencyKey, SideEffectClass, ToolCallId, ToolOutcome};
 
 use crate::{AgentError, AgentState, AgentToolRuntime};
 
@@ -9,6 +9,12 @@ pub(crate) enum ToolDriverPlan {
     RecordCalls {
         position: StepPosition,
         calls: Vec<ToolCallRecorded>,
+    },
+    RequestApproval {
+        position: StepPosition,
+        call_id: ToolCallId,
+        reason: String,
+        risk: String,
     },
     CompleteWithoutDispatch {
         position: StepPosition,
@@ -54,9 +60,6 @@ pub(crate) fn plan_tool_boundary(
             let side_effect = runtime
                 .resolve(&call.name)
                 .map(|registration| registration.definition().side_effect)
-                // Unknown tools never dispatch. Using the most conservative class
-                // prevents a future implementation from accidentally treating a
-                // partially recovered unresolved name as retry-safe.
                 .unwrap_or(SideEffectClass::NonIdempotentWrite);
             ToolCallRecorded {
                 call_id: call.call_id.clone(),
@@ -97,6 +100,15 @@ pub(crate) fn plan_tool_boundary(
                 announced.call_id
             ),
         })?;
+
+    if state
+        .projection
+        .pending_approval
+        .as_ref()
+        .is_some_and(|approval| approval.data.call_id == pending.data.call_id)
+    {
+        return Ok(ToolDriverPlan::Deferred);
+    }
 
     let Some(registration) = runtime.resolve(&pending.data.tool).cloned() else {
         if state
@@ -196,15 +208,17 @@ pub(crate) fn plan_tool_boundary(
             .validate(registration.definition(), &pending.data.arguments_json)
             .is_err()
         {
-            // A prior dispatch already crossed the external boundary. A changed
-            // validator must not rewrite that uncertain history into a synthetic
-            // terminal validation error.
             return Ok(ToolDriverPlan::Deferred);
         }
-        if !matches!(
-            runtime.policy().evaluate(&policy_input(state, &pending)),
-            PolicyDecision::Allow
-        ) {
+
+        let policy_allows_retry = match projection.approvals.get(&pending.data.call_id) {
+            Some(resolution) => resolution.decision == ApprovalDecision::Allow,
+            None => matches!(
+                runtime.policy().evaluate(&policy_input(state, &pending)),
+                PolicyDecision::Allow
+            ),
+        };
+        if !policy_allows_retry {
             return Ok(ToolDriverPlan::Deferred);
         }
 
@@ -243,6 +257,25 @@ pub(crate) fn plan_tool_boundary(
         });
     }
 
+    if let Some(resolution) = projection.approvals.get(&pending.data.call_id) {
+        return Ok(match resolution.decision {
+            ApprovalDecision::Allow => ToolDriverPlan::Dispatch {
+                position,
+                call: pending,
+                registration: Box::new(registration),
+                attempt: 1,
+                idempotency_key: None,
+            },
+            ApprovalDecision::Deny => ToolDriverPlan::CompleteWithoutDispatch {
+                position,
+                call_id: pending.data.call_id,
+                outcome: ToolOutcome::Denied {
+                    reason: approval_denial_reason(resolution.note.as_deref()),
+                },
+            },
+        });
+    }
+
     match runtime.policy().evaluate(&policy_input(state, &pending)) {
         PolicyDecision::Allow => Ok(ToolDriverPlan::Dispatch {
             position,
@@ -256,18 +289,22 @@ pub(crate) fn plan_tool_boundary(
             call_id: pending.data.call_id,
             outcome: ToolOutcome::Denied { reason },
         }),
-        PolicyDecision::Ask { reason, risk } => Ok(ToolDriverPlan::CompleteWithoutDispatch {
+        PolicyDecision::Ask { reason, risk } => Ok(ToolDriverPlan::RequestApproval {
             position,
             call_id: pending.data.call_id,
-            outcome: ToolOutcome::Denied {
-                reason: format!(
-                    "approval required but no approval surface is attached in Batch 08: {reason} (risk: {risk})"
-                ),
-            },
+            reason,
+            risk,
         }),
         _ => Err(AgentError::InvalidToolRuntime {
             message: "tool policy returned an unsupported decision variant".to_owned(),
         }),
+    }
+}
+
+fn approval_denial_reason(note: Option<&str>) -> String {
+    match note {
+        Some(note) if !note.is_empty() => format!("tool execution denied by approval: {note}"),
+        _ => "tool execution denied by approval".to_owned(),
     }
 }
 

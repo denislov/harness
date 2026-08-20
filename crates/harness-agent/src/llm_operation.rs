@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use harness_llm::{LlmProvider, LlmStreamAssembler, LlmStreamOutcome, ModelRequest};
@@ -19,30 +19,42 @@ pub(crate) fn spawn_llm_operation(
     provider: Arc<dyn LlmProvider>,
     request: ModelRequest,
     position: StepPosition,
+    timeout_ms: u64,
     tx: mpsc::Sender<MailboxMessage>,
 ) -> JoinHandle<()> {
     let request_id = request.request_id.clone();
     tokio::spawn(async move {
-        let mut stream = provider.stream(request);
-        let mut assembler = LlmStreamAssembler::new();
+        let operation = async move {
+            let mut stream = provider.stream(request);
+            let mut assembler = LlmStreamAssembler::new();
 
-        let outcome = loop {
-            match stream.next().await {
-                Some(Ok(event)) => {
-                    if let Err(error) = assembler.push(event) {
-                        break Err(PortableError::new(
-                            ErrorCode::ProviderProtocolError,
-                            error.to_string(),
-                        ));
+            loop {
+                match stream.next().await {
+                    Some(Ok(event)) => {
+                        if let Err(error) = assembler.push(event) {
+                            break Err(PortableError::new(
+                                ErrorCode::ProviderProtocolError,
+                                error.to_string(),
+                            ));
+                        }
+                    }
+                    Some(Err(error)) => break Err(error),
+                    None => {
+                        break assembler.finish().map_err(|error| {
+                            PortableError::new(ErrorCode::ProviderProtocolError, error.to_string())
+                        });
                     }
                 }
-                Some(Err(error)) => break Err(error),
-                None => {
-                    break assembler.finish().map_err(|error| {
-                        PortableError::new(ErrorCode::ProviderProtocolError, error.to_string())
-                    });
-                }
             }
+        };
+
+        let outcome = match tokio::time::timeout(Duration::from_millis(timeout_ms), operation).await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(PortableError::new(
+                ErrorCode::DeadlineExceeded,
+                format!("model request {request_id} exceeded timeout of {timeout_ms} ms"),
+            )),
         };
 
         let _ = tx

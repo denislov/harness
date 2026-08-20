@@ -12,10 +12,10 @@ mod usage;
 pub use blob::{BlobRef, Sha256Digest, Sha256DigestError};
 pub use counters::{CounterError, EventSeq, MAX_JS_SAFE_INTEGER, StepNo, StreamSeq, TurnNo};
 pub use error::{ErrorCode, PortableError};
-pub use execution::{CancelCause, InboxTarget, SideEffectClass};
+pub use execution::{ApprovalDecision, CancelCause, InboxTarget, SideEffectClass};
 pub use ids::{
-    AgentInstanceId, BlobId, EventId, IdempotencyKey, IdentifierError, InvocationId, MessageId,
-    ProviderId, RequestId, SessionId, ToolCallId,
+    AgentInstanceId, ApprovalId, BlobId, EventId, IdempotencyKey, IdentifierError, InvocationId,
+    MessageId, ProviderId, RequestId, SessionId, ToolCallId,
 };
 pub use json_text::{JsonText, JsonTextError};
 pub use message::{ContentBlock, Message, MessageSource, Role};

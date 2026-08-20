@@ -1,4 +1,6 @@
-use harness_types::{CancelCause, EventId, EventSeq, InboxTarget, Message, MessageId};
+use harness_types::{
+    ApprovalDecision, ApprovalId, CancelCause, EventId, EventSeq, InboxTarget, Message, MessageId,
+};
 
 /// State-changing commands accepted by a live Agent actor.
 #[derive(Clone, Debug, PartialEq)]
@@ -12,6 +14,11 @@ pub enum AgentCommand {
     Cancel {
         cause: CancelCause,
         keep_inbox: bool,
+    },
+    ResolveApproval {
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        note: Option<String>,
     },
     Shutdown,
 }
@@ -40,12 +47,21 @@ impl AgentCommand {
     pub const fn cancel(cause: CancelCause, keep_inbox: bool) -> Self {
         Self::Cancel { cause, keep_inbox }
     }
+
+    pub fn resolve_approval(
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        note: Option<String>,
+    ) -> Self {
+        Self::ResolveApproval {
+            approval_id,
+            decision,
+            note,
+        }
+    }
 }
 
 /// Durable acknowledgement for `AgentCommand::Send`.
-///
-/// Receipt delivery occurs only after `inbox/enqueued` has been committed and
-/// incorporated into the actor's local projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendReceipt {
     pub message_id: MessageId,
@@ -54,10 +70,20 @@ pub struct SendReceipt {
     pub wake_requested: bool,
 }
 
+/// Durable acknowledgement for an approval resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalReceipt {
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
+    pub event_id: EventId,
+    pub seq: EventSeq,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AgentCommandAck {
     Send(SendReceipt),
     Cancelled,
+    ApprovalResolved(ApprovalReceipt),
     Shutdown,
 }

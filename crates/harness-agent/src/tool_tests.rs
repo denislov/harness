@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use futures_util::stream;
@@ -16,14 +17,14 @@ use harness_session::{
 };
 use harness_storage_local::{MemoryBlobStore, MemorySessionStore};
 use harness_tools::{
-    AllowAllToolPolicy, IdempotencySupport, ToolArgumentValidationError, ToolArgumentValidator,
-    ToolDefinition, ToolExecutionFuture, ToolExecutor, ToolInvocation, ToolRegistration,
-    ToolRegistry,
+    AllowAllToolPolicy, IdempotencySupport, PolicyDecision, ToolArgumentValidationError,
+    ToolArgumentValidator, ToolDefinition, ToolExecutionFuture, ToolExecutor, ToolInvocation,
+    ToolPolicy, ToolPolicyInput, ToolRegistration, ToolRegistry,
 };
 use harness_types::{
-    AgentInstanceId, ContentBlock, EventId, EventSeq, JsonText, Message, MessageId, MessageSource,
-    PortableError, ProviderId, Role, SessionId, SideEffectClass, StreamSeq, Timestamp, ToolCallId,
-    ToolOutcome,
+    AgentInstanceId, ApprovalDecision, CancelCause, ContentBlock, EventId, EventSeq, JsonText,
+    Message, MessageId, MessageSource, PortableError, ProviderId, Role, SessionId, SideEffectClass,
+    StreamSeq, Timestamp, ToolCallId, ToolOutcome,
 };
 
 use crate::{
@@ -561,6 +562,457 @@ async fn unknown_non_idempotent_outcome_blocks_without_redispatch() {
         !events
             .iter()
             .any(|event| matches!(event.payload(), SessionEventPayload::ToolResult(_)))
+    );
+
+    spawned.handle.shutdown().await.unwrap();
+    spawned.task.join().await.unwrap();
+}
+
+struct AskToolPolicy;
+
+impl ToolPolicy for AskToolPolicy {
+    fn evaluate(&self, _input: &ToolPolicyInput) -> PolicyDecision {
+        PolicyDecision::Ask {
+            reason: "explicit user approval required".to_owned(),
+            risk: "filesystem-read".to_owned(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn approval_survives_restart_and_then_allows_dispatch() {
+    let session_id: SessionId = id("ses_tool_approval");
+    let llm_provider_id: ProviderId = id("prv_llm_approval");
+    let store = create_store(&session_id).await;
+    let llm = Arc::new(ScriptedLlm::new(
+        llm_provider_id.clone(),
+        vec![tool_call_script(), text_script("approved result")],
+    ));
+    let llm_runtime = AgentLlmRuntime::new(
+        model_config(llm_provider_id),
+        llm,
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap();
+    let tool = Arc::new(ReadFileTool {
+        provider_id: id("prv_tools_approval"),
+        calls: AtomicU64::new(0),
+    });
+    let definition = ToolDefinition {
+        name: "read_file".to_owned(),
+        version: "1".to_owned(),
+        description: "Read a UTF-8 file".to_owned(),
+        input_schema: serde_json::json!({"type": "object"}),
+        output_schema: None,
+        parallel_safe: true,
+        side_effect: SideEffectClass::ReadOnly,
+        default_timeout_ms: 30_000,
+    };
+    let registration =
+        ToolRegistration::new(definition, tool.clone(), Arc::new(ReadFileValidator)).unwrap();
+    let tool_runtime = AgentToolRuntime::new(
+        Arc::new(ToolRegistry::new(vec![registration]).unwrap()),
+        Arc::new(AskToolPolicy),
+        1,
+    )
+    .unwrap();
+
+    let first = spawn_agent_with_capabilities(
+        id("agt_tool_approval_1"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(700)),
+        llm_runtime.clone(),
+        tool_runtime.clone(),
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+    first
+        .handle
+        .followup(user_message("msg_approval", "read foo.txt"))
+        .await
+        .unwrap();
+    let waiting = wait_for_state(&first.handle, |state| {
+        state.projection.pending_approval.is_some()
+    })
+    .await;
+    let approval_id = waiting
+        .projection
+        .pending_approval
+        .as_ref()
+        .unwrap()
+        .data
+        .approval_id
+        .clone();
+    assert_eq!(tool.calls(), 0);
+    first.handle.shutdown().await.unwrap();
+    first.task.join().await.unwrap();
+
+    let second = spawn_agent_with_capabilities(
+        id("agt_tool_approval_2"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(800)),
+        llm_runtime,
+        tool_runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+    let restarted = second.handle.snapshot().await.unwrap();
+    assert!(restarted.projection.pending_approval.is_some());
+    second
+        .handle
+        .resolve_approval(
+            approval_id,
+            ApprovalDecision::Allow,
+            Some("approved in test".to_owned()),
+        )
+        .await
+        .unwrap();
+    wait_for_state(&second.handle, |state| {
+        state.projection.lifecycle.open_turn.is_none()
+            && state.active_operation.is_none()
+            && state.projection.model_messages.len() == 4
+    })
+    .await;
+    assert_eq!(tool.calls(), 1);
+
+    let events = store.read(&session_id, EventSeq::FIRST, 128).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::ApprovalRequested(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::ApprovalResolved(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::ToolDispatched(_)))
+            .count(),
+        1
+    );
+
+    second.handle.shutdown().await.unwrap();
+    second.task.join().await.unwrap();
+}
+
+#[tokio::test]
+async fn approval_denial_is_monotonic_and_never_dispatches() {
+    let session_id: SessionId = id("ses_tool_approval_deny");
+    let llm_provider_id: ProviderId = id("prv_llm_approval_deny");
+    let store = create_store(&session_id).await;
+    let llm_runtime = AgentLlmRuntime::new(
+        model_config(llm_provider_id.clone()),
+        Arc::new(ScriptedLlm::new(
+            llm_provider_id,
+            vec![tool_call_script(), text_script("denial observed")],
+        )),
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap();
+    let tool = Arc::new(ReadFileTool {
+        provider_id: id("prv_tools_approval_deny"),
+        calls: AtomicU64::new(0),
+    });
+    let registration = ToolRegistration::new(
+        ToolDefinition {
+            name: "read_file".to_owned(),
+            version: "1".to_owned(),
+            description: "Read a UTF-8 file".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            parallel_safe: true,
+            side_effect: SideEffectClass::ReadOnly,
+            default_timeout_ms: 30_000,
+        },
+        tool.clone(),
+        Arc::new(ReadFileValidator),
+    )
+    .unwrap();
+    let tool_runtime = AgentToolRuntime::new(
+        Arc::new(ToolRegistry::new(vec![registration]).unwrap()),
+        Arc::new(AskToolPolicy),
+        1,
+    )
+    .unwrap();
+    let spawned = spawn_agent_with_capabilities(
+        id("agt_tool_approval_deny"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(850)),
+        llm_runtime,
+        tool_runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    spawned
+        .handle
+        .followup(user_message("msg_approval_deny", "read foo.txt"))
+        .await
+        .unwrap();
+    let waiting = wait_for_state(&spawned.handle, |state| {
+        state.projection.pending_approval.is_some()
+    })
+    .await;
+    let approval_id = waiting
+        .projection
+        .pending_approval
+        .as_ref()
+        .unwrap()
+        .data
+        .approval_id
+        .clone();
+    spawned
+        .handle
+        .resolve_approval(
+            approval_id,
+            ApprovalDecision::Deny,
+            Some("not permitted".to_owned()),
+        )
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| {
+        state.projection.lifecycle.open_turn.is_none()
+            && state.active_operation.is_none()
+            && state.projection.model_messages.len() == 4
+    })
+    .await;
+    assert_eq!(tool.calls(), 0);
+
+    let events = store.read(&session_id, EventSeq::FIRST, 128).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload(), SessionEventPayload::ToolDispatched(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::ApprovalResolved(data)
+            if data.decision == ApprovalDecision::Deny
+    )));
+
+    spawned.handle.shutdown().await.unwrap();
+    spawned.task.join().await.unwrap();
+}
+
+struct PendingReadTool {
+    provider_id: ProviderId,
+    calls: AtomicU64,
+}
+
+impl ToolExecutor for PendingReadTool {
+    fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    fn invoke(&self, _invocation: ToolInvocation) -> ToolExecutionFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(std::future::pending::<Result<ToolOutcome, PortableError>>())
+    }
+}
+
+fn pending_read_runtime(executor: Arc<PendingReadTool>, timeout_ms: u64) -> AgentToolRuntime {
+    let registration = ToolRegistration::new(
+        ToolDefinition {
+            name: "read_file".to_owned(),
+            version: "1".to_owned(),
+            description: "Read one file".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            parallel_safe: true,
+            side_effect: SideEffectClass::ReadOnly,
+            default_timeout_ms: timeout_ms,
+        },
+        executor,
+        Arc::new(ReadFileValidator),
+    )
+    .unwrap();
+    AgentToolRuntime::new(
+        Arc::new(ToolRegistry::new(vec![registration]).unwrap()),
+        Arc::new(AllowAllToolPolicy),
+        1,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn cancel_pending_read_only_tool_records_cancelled_result() {
+    let session_id: SessionId = id("ses_tool_cancel");
+    let llm_provider_id: ProviderId = id("prv_llm_tool_cancel");
+    let store = create_store(&session_id).await;
+    let llm_runtime = AgentLlmRuntime::new(
+        model_config(llm_provider_id.clone()),
+        Arc::new(ScriptedLlm::new(llm_provider_id, vec![tool_call_script()])),
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap();
+    let tool = Arc::new(PendingReadTool {
+        provider_id: id("prv_tool_cancel"),
+        calls: AtomicU64::new(0),
+    });
+    let tool_runtime = pending_read_runtime(tool.clone(), 30_000);
+    let spawned = spawn_agent_with_capabilities(
+        id("agt_tool_cancel"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(900)),
+        llm_runtime,
+        tool_runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    spawned
+        .handle
+        .followup(user_message("msg_tool_cancel", "read foo.txt"))
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| {
+        matches!(
+            state.active_operation,
+            Some(crate::ActiveAgentOperation::Tool { .. })
+        )
+    })
+    .await;
+    spawned
+        .handle
+        .cancel(CancelCause::User, true)
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| {
+        state.active_operation.is_none() && state.projection.lifecycle.open_turn.is_none()
+    })
+    .await;
+
+    assert_eq!(tool.calls.load(Ordering::Relaxed), 1);
+    let events = store.read(&session_id, EventSeq::FIRST, 128).await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::ToolResult(data)
+            if matches!(&data.outcome, ToolOutcome::Cancelled { cause: CancelCause::User })
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        SessionEventPayload::StepEnded(data) if data.reason == StepEndReason::Cancelled
+    )));
+
+    spawned.handle.shutdown().await.unwrap();
+    spawned.task.join().await.unwrap();
+}
+
+struct PendingNonIdempotentTool {
+    provider_id: ProviderId,
+}
+
+impl ToolExecutor for PendingNonIdempotentTool {
+    fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    fn invoke(&self, _invocation: ToolInvocation) -> ToolExecutionFuture {
+        Box::pin(std::future::pending::<Result<ToolOutcome, PortableError>>())
+    }
+}
+
+#[tokio::test]
+async fn non_idempotent_tool_timeout_blocks_without_redispatch() {
+    let session_id: SessionId = id("ses_tool_timeout_block");
+    let llm_provider_id: ProviderId = id("prv_llm_timeout_block");
+    let store = create_store(&session_id).await;
+    let llm_runtime = AgentLlmRuntime::new(
+        model_config(llm_provider_id.clone()),
+        Arc::new(ScriptedLlm::new(
+            llm_provider_id,
+            vec![named_tool_call_script(
+                "call_timeout_send",
+                "send_email",
+                r#"{"to":"a@example.com"}"#,
+            )],
+        )),
+        Arc::new(MemoryBlobStore::new()),
+    )
+    .unwrap();
+    let registration = ToolRegistration::new(
+        ToolDefinition {
+            name: "send_email".to_owned(),
+            version: "1".to_owned(),
+            description: "Send one email".to_owned(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            parallel_safe: false,
+            side_effect: SideEffectClass::NonIdempotentWrite,
+            default_timeout_ms: 100,
+        },
+        Arc::new(PendingNonIdempotentTool {
+            provider_id: id("prv_timeout_write"),
+        }),
+        Arc::new(AcceptObjectValidator),
+    )
+    .unwrap();
+    let tool_runtime = AgentToolRuntime::new(
+        Arc::new(ToolRegistry::new(vec![registration]).unwrap()),
+        Arc::new(AllowAllToolPolicy),
+        3,
+    )
+    .unwrap();
+    let spawned = spawn_agent_with_capabilities(
+        id("agt_tool_timeout_block"),
+        session_id.clone(),
+        store.clone(),
+        Arc::new(TestEventSource::new(1000)),
+        llm_runtime,
+        tool_runtime,
+        AgentActorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    spawned
+        .handle
+        .followup(user_message("msg_tool_timeout", "send it"))
+        .await
+        .unwrap();
+    wait_for_state(&spawned.handle, |state| {
+        matches!(
+            state.active_operation,
+            Some(crate::ActiveAgentOperation::Tool { .. })
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let state = wait_for_state(&spawned.handle, |state| {
+        state.active_operation.is_none()
+            && state.projection.unresolved_recovery.is_some()
+            && state.projection.lifecycle.open_turn.is_none()
+    })
+    .await;
+    assert!(matches!(state.gate, crate::ExecutionGate::Blocked(_)));
+
+    let events = store.read(&session_id, EventSeq::FIRST, 128).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::ToolDispatched(_)))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload(), SessionEventPayload::RecoveryBlocked(_)))
     );
 
     spawned.handle.shutdown().await.unwrap();

@@ -38,6 +38,11 @@ pub(crate) fn plan_next(state: &AgentState) -> Result<DriverPlan, AgentError> {
         ResumeDecision::Clean => plan_clean(state),
         ResumeDecision::ContinueOpenTurn { turn } => plan_open_turn(state, *turn),
         ResumeDecision::ContinueOpenStep { position } => plan_open_step(state, *position),
+        ResumeDecision::AwaitingApproval { position, .. } => Ok(DriverPlan::Park(
+            AgentDriverBoundary::AwaitingApproval {
+                position: *position,
+            },
+        )),
         ResumeDecision::RecoverToolBatch { position, .. } => {
             Ok(DriverPlan::Park(AgentDriverBoundary::ReadyForTools {
                 position: *position,
