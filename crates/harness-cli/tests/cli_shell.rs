@@ -55,7 +55,7 @@ args = ["providers/example-python/provider.py"]
 cwd = "{}"
 request_timeout_ms = 5000
 shutdown_timeout_ms = 2000
-credentials = { HARNESS_CLI_TEST_PATH = "cli-test-path" }
+credentials = {{ HARNESS_CLI_TEST_PATH = "cli-test-path" }}
 
 [profiles.default]
 policy = "allow-all"
