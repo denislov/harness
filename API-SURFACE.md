@@ -1952,3 +1952,31 @@ EXECUTION_COMPOSITION_MEDIA_TYPE
 ```
 
 `HarnessRuntime::open_agent` now reconciles the requested compiled profile against the latest durable composition before Agent spawn. New error variants include `CompositionBootstrap`, `CompositionSnapshotVerify`, `LegacyCompositionUnbound`, `CompositionDrift`, and `CompositionInvariant`.
+
+
+## Batch 20 API surface
+
+Batch 20 introduces no production Harness API or wire-protocol change.
+
+### `harness-conformance` (workspace-only, unpublished)
+
+Reusable conformance fixtures:
+
+```rust
+AppendFault
+FaultInjectingSessionStore
+ObservedAppend
+TestEventSource
+ScriptedLlm
+```
+
+`FaultInjectingSessionStore` commits through the wrapped `SessionStore` first, then can deliberately return an error for one configured committed event occurrence. It is test infrastructure for the post-commit/pre-ack crash cut and is not used by production crates.
+
+### Conformance assets
+
+```text
+conformance/crash-matrix-v1.json
+conformance/validate_crash_matrix.py
+```
+
+The matrix records crash/fault cuts, their atomic append batches, expected recovery properties, and owning Cargo test commands.

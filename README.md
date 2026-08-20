@@ -1243,3 +1243,12 @@ Batch 19 adds durable execution-composition epochs. Every compiled Agent profile
 Before an Agent is spawned, `HarnessRuntime` verifies and reconciles that compiled snapshot with the Session's latest durable `composition/activated` event. Quiescent Sessions may activate a new snapshot; unfinished work must resume under the same snapshot or opening fails closed with `CompositionDrift`. Pre-Batch-19 Sessions with unfinished work and no activation fail as `LegacyCompositionUnbound`.
 
 The composition event is deliberately small: it records only the profile name and BlobRef. Credentials remain outside durable Session state, and per-model-request snapshots remain the exact audit record of each request. See `spec/batch-19-durable-execution-composition.md`.
+
+
+# Harness API Batch 20
+
+Batch 20 adds deterministic crash/fault-injection conformance without changing production Agent, SessionEvent, Provider Protocol, configuration, or Runtime semantics. The new unpublished workspace crate `harness-conformance` wraps `SessionStore` to simulate the precise cut where an append is durable but its success acknowledgement is lost before the Agent updates its process-local projection.
+
+The crash matrix reopens the same Session after step-entry, model-request, assistant, ToolCall, approval, dispatch, result, step, and turn commit boundaries. Provider-fault cases separately verify read-only retry, keyed idempotent-write deduplication, and fail-closed non-idempotent writes. One dispatch crash case drops and reopens the real SQLite/filesystem durable-local stores, and the Batch 19 composition-drift acceptance remains part of the matrix.
+
+See `spec/batch-20-crash-fault-injection-conformance.md` and `conformance/crash-matrix-v1.json`.

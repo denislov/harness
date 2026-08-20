@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "suite": "harness-crash-fault-v1",
+  "semantics": {
+    "crashCut": "after SessionStore append commit, before the Agent observes the successful append acknowledgement",
+    "atomicity": "a crash cut exists between append transactions, never between SessionEvents in one committed append batch"
+  },
+  "cases": [
+    {
+      "id": "agent-postcommit-step-entry",
+      "kind": "agent-post-commit",
+      "cut": "user/message",
+      "atomicBatch": [
+        "turn/started",
+        "inbox/claimed",
+        "step/started",
+        "user/message"
+      ],
+      "expect": "the whole step-entry batch replays as one committed boundary and the model starts once after restart",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-model-requested",
+      "kind": "agent-post-commit",
+      "cut": "model/requested",
+      "atomicBatch": [
+        "model/requested"
+      ],
+      "expect": "startup records interrupted model failure, reissues model work, and does not duplicate Tool effects",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-assistant-toolcall",
+      "kind": "agent-post-commit",
+      "cut": "assistant/message",
+      "atomicBatch": [
+        "assistant/message"
+      ],
+      "expect": "durable ToolCall announcement is reused and the first model request is not repeated",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-terminal-assistant",
+      "kind": "agent-post-commit",
+      "cut": "assistant/message#2",
+      "atomicBatch": [
+        "assistant/message",
+        "step/ended"
+      ],
+      "expect": "terminal assistant and step end remain atomic; restart only closes the turn and does not repeat the model call",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-tool-call",
+      "kind": "agent-post-commit",
+      "cut": "tool/call",
+      "atomicBatch": [
+        "tool/call"
+      ],
+      "expect": "recorded ToolCall resumes toward one external invocation",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-tool-dispatched",
+      "kind": "agent-post-commit",
+      "cut": "tool/dispatched",
+      "atomicBatch": [
+        "tool/dispatched"
+      ],
+      "expect": "read-only recovery creates attempt 2 with the same idempotency key and one external invocation",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-tool-result",
+      "kind": "agent-post-commit",
+      "cut": "tool/result",
+      "atomicBatch": [
+        "tool/result"
+      ],
+      "expect": "durable terminal Tool result prevents redispatch",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-tool-step-ended",
+      "kind": "agent-post-commit",
+      "cut": "step/ended",
+      "atomicBatch": [
+        "step/ended"
+      ],
+      "expect": "tool-continuation step boundary resumes at the next model step without repeating the Tool",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "agent-postcommit-turn-ended",
+      "kind": "agent-post-commit",
+      "cut": "turn/ended",
+      "atomicBatch": [
+        "turn/ended"
+      ],
+      "expect": "durably ended turn reopens quiescent with no repeated model or Tool work",
+      "test": "cargo test -p harness-conformance --test crash_matrix"
+    },
+    {
+      "id": "approval-postcommit-requested",
+      "kind": "approval-post-commit",
+      "cut": "approval/requested",
+      "atomicBatch": [
+        "approval/requested"
+      ],
+      "expect": "restart remains parked on the original approval and dispatches only after explicit allow",
+      "test": "cargo test -p harness-conformance --test approval_crash_matrix"
+    },
+    {
+      "id": "approval-postcommit-resolved",
+      "kind": "approval-post-commit",
+      "cut": "approval/resolved",
+      "atomicBatch": [
+        "approval/resolved"
+      ],
+      "expect": "durable allow survives lost acknowledgement and does not request approval twice",
+      "test": "cargo test -p harness-conformance --test approval_crash_matrix"
+    },
+    {
+      "id": "provider-read-transport-loss",
+      "kind": "provider-fault",
+      "cut": "read-only provider failure after durable dispatch",
+      "atomicBatch": [
+        "tool/dispatched"
+      ],
+      "expect": "automatic retry is durable and preserves provider and idempotency key",
+      "test": "cargo test -p harness-conformance --test provider_fault_matrix"
+    },
+    {
+      "id": "provider-idempotent-write-transport-loss",
+      "kind": "provider-fault",
+      "cut": "idempotent write side effect applied before transport loss",
+      "atomicBatch": [
+        "tool/dispatched"
+      ],
+      "expect": "retry reuses the idempotency key and provider deduplication keeps one external side effect",
+      "test": "cargo test -p harness-conformance --test provider_fault_matrix"
+    },
+    {
+      "id": "provider-nonidempotent-write-transport-loss",
+      "kind": "provider-fault",
+      "cut": "non-idempotent write side effect may have applied before transport loss",
+      "atomicBatch": [
+        "tool/dispatched"
+      ],
+      "expect": "Core persists recovery/blocked and never redispatches automatically",
+      "test": "cargo test -p harness-conformance --test provider_fault_matrix"
+    },
+    {
+      "id": "durable-local-dispatch-ack-loss",
+      "kind": "storage-reopen",
+      "cut": "tool/dispatched",
+      "atomicBatch": [
+        "tool/dispatched"
+      ],
+      "expect": "SQLite and filesystem BlobStore reopen with the original request snapshot and safe retry state",
+      "test": "cargo test -p harness-conformance --test durable_local_crash"
+    },
+    {
+      "id": "composition-drift-undispatched-toolcall",
+      "kind": "composition-drift",
+      "cut": "tool/call durable, tool/dispatched absent, execution composition changes before reopen",
+      "atomicBatch": [
+        "tool/call"
+      ],
+      "expect": "HarnessRuntime fails closed with CompositionDrift and does not activate the new epoch",
+      "test": "cargo test -p harness-runtime --test composition_epoch"
+    }
+  ]
+}

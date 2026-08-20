@@ -1082,3 +1082,19 @@ See `spec/batch-14-runtime-composition.md` for the complete contract.
 - Provider supervision/restart remains deferred; provider availability recovery must not own Tool retry safety.
 
 See `spec/batch-19-durable-execution-composition.md`.
+
+
+## Batch 20 spec delta — Crash / Fault-Injection Conformance Matrix
+
+- Adds the unpublished workspace-only `harness-conformance` crate; production crates do not depend on it.
+- Defines the deterministic crash cut as SessionStore append committed but successful acknowledgement not observed by the Agent.
+- Treats each `SessionStore::append` batch as the atomic durability boundary; tests do not manufacture partial states inside one batch.
+- Adds post-commit restart coverage for step entry, model request, ToolCall assistant, terminal assistant, `tool/call`, `tool/dispatched`, `tool/result`, ToolContinuation `step/ended`, and `turn/ended`.
+- Adds acknowledgement-loss coverage for `approval/requested` and `approval/resolved`.
+- Adds Provider fault cases for read-only retry, keyed idempotent-write deduplication, and non-idempotent unknown-outcome blocking.
+- Adds a real `DurableLocalStorage` reopen case after `tool/dispatched` acknowledgement loss and verifies request BlobRefs after reopen.
+- Keeps Batch 19 execution-composition drift as a required matrix case.
+- Adds `conformance/crash-matrix-v1.json` plus a dependency-free validator.
+- Does not add Provider supervision, production failpoints, Session schema evolution, hot reload, or parallel Tool scheduling.
+
+See `spec/batch-20-crash-fault-injection-conformance.md`.
