@@ -95,6 +95,10 @@ impl ToolArgumentValidator for ObjectArgumentValidator {
             ))
         }
     }
+
+    fn composition_identity(&self) -> String {
+        "harness-config/object-json-validator/v1".to_owned()
+    }
 }
 
 fn compile_config(

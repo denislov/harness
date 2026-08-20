@@ -1,6 +1,9 @@
-use harness_agent::{AgentLlmRuntimeError, AgentSpawnError, AgentToolRuntimeError};
+use harness_agent::{
+    AgentBootstrapError, AgentLlmRuntimeError, AgentSpawnError, AgentToolRuntimeError,
+};
 use harness_provider_host::{ProviderAdapterError, ProviderHostError};
 use harness_session::SessionStoreError;
+use harness_storage::BlobStoreError;
 use harness_storage_local::DurableLocalStorageError;
 use harness_tools::ToolRegistryError;
 use harness_types::{ProviderId, SessionId};
@@ -132,6 +135,24 @@ pub enum HarnessRuntimeBuildError {
         #[source]
         source: Box<AgentToolRuntimeError>,
     },
+
+    #[error(
+        "Agent profile {profile} failed to serialize its execution composition snapshot: {source}"
+    )]
+    CompositionSnapshotSerialize {
+        profile: String,
+        #[source]
+        source: Box<serde_json::Error>,
+    },
+
+    #[error(
+        "Agent profile {profile} failed to persist its execution composition snapshot: {source}"
+    )]
+    CompositionSnapshotStore {
+        profile: String,
+        #[source]
+        source: Box<BlobStoreError>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -142,6 +163,47 @@ pub enum HarnessRuntimeError {
 
     #[error("Agent profile {0:?} was not found")]
     ProfileNotFound(String),
+
+    #[error("failed to inspect durable execution composition for Session {session_id}: {source}")]
+    CompositionBootstrap {
+        session_id: SessionId,
+        #[source]
+        source: Box<AgentBootstrapError>,
+    },
+
+    #[error(
+        "failed to verify durable execution composition snapshot for Session {session_id}: {source}"
+    )]
+    CompositionSnapshotVerify {
+        session_id: SessionId,
+        #[source]
+        source: Box<BlobStoreError>,
+    },
+
+    #[error(
+        "Session {session_id} has unfinished pre-Batch-19 work with no durable execution composition; requested profile {requested_profile:?} cannot be proven safe"
+    )]
+    LegacyCompositionUnbound {
+        session_id: SessionId,
+        requested_profile: String,
+    },
+
+    #[error(
+        "Session {session_id} has unfinished work under composition {active_profile:?} ({active_sha256}); requested {requested_profile:?} resolves to {requested_sha256}"
+    )]
+    CompositionDrift {
+        session_id: SessionId,
+        active_profile: String,
+        active_sha256: String,
+        requested_profile: String,
+        requested_sha256: String,
+    },
+
+    #[error("Session {session_id} execution-composition invariant failed: {message}")]
+    CompositionInvariant {
+        session_id: SessionId,
+        message: String,
+    },
 
     #[error("Session {0} already has an active or transitioning Agent")]
     AgentAlreadyActive(SessionId),

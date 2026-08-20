@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     AgentRegistry, HarnessRuntimeBuilder, HarnessRuntimeError, HarnessRuntimeInfo, LlmRegistry,
     ProfileRegistry, ProviderRegistry, RuntimeEventBus, RuntimeEventKind, RuntimeIdSource,
+    composition::reconcile_session_composition,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +167,25 @@ impl HarnessRuntime {
             profile: profile_name.to_owned(),
             instance_id: instance_id.clone(),
         });
+        if let Err(error) = reconcile_session_composition(
+            self.session_store.as_ref(),
+            self.event_source.as_ref(),
+            self.blob_store.as_ref(),
+            &session_id,
+            profile_name,
+            &profile.composition,
+            profile.actor_config.bootstrap_page_size,
+        )
+        .await
+        {
+            self.agents.rollback_open(&session_id).await;
+            self.events.publish(RuntimeEventKind::AgentOpenFailed {
+                session_id: session_id.clone(),
+                profile: profile_name.to_owned(),
+                instance_id,
+            });
+            return Err(error);
+        }
         let spawned = match spawn_agent_with_capabilities(
             instance_id.clone(),
             session_id.clone(),

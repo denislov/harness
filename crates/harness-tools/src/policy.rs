@@ -21,6 +21,15 @@ pub enum PolicyDecision {
 
 pub trait ToolPolicy: Send + Sync {
     fn evaluate(&self, input: &ToolPolicyInput) -> PolicyDecision;
+
+    /// Stable identity included in durable execution-composition snapshots.
+    ///
+    /// The default preserves source compatibility by identifying the concrete
+    /// Rust type. Policies whose behavior depends on runtime configuration
+    /// should override this with a stable semantic version/config identity.
+    fn composition_identity(&self) -> String {
+        format!("rust-type:{}", std::any::type_name::<Self>())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -29,5 +38,9 @@ pub struct AllowAllToolPolicy;
 impl ToolPolicy for AllowAllToolPolicy {
     fn evaluate(&self, _input: &ToolPolicyInput) -> PolicyDecision {
         PolicyDecision::Allow
+    }
+
+    fn composition_identity(&self) -> String {
+        "harness-tools/allow-all/v1".to_owned()
     }
 }

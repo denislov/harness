@@ -18,9 +18,9 @@ harness-storage-local = { path = "../harness-storage-local" }
 harness-tools = { path = "../harness-tools" }
 harness-types = { path = "../harness-types" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

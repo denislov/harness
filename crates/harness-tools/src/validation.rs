@@ -14,6 +14,15 @@ pub trait ToolArgumentValidator: Send + Sync {
         definition: &ToolDefinition,
         arguments_json: &JsonText,
     ) -> Result<(), ToolArgumentValidationError>;
+
+    /// Stable identity included in durable execution-composition snapshots.
+    ///
+    /// The default identifies the concrete Rust type. Validators whose behavior
+    /// depends on configuration should override this with a stable semantic
+    /// version/config identity so in-flight recovery detects that change.
+    fn composition_identity(&self) -> String {
+        format!("rust-type:{}", std::any::type_name::<Self>())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]

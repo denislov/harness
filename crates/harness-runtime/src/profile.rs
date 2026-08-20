@@ -8,11 +8,16 @@ use harness_llm::{LlmProvider, ModelOptions, ModelRequestConfig};
 use harness_provider_host::ProviderHostToolAdapter;
 use harness_storage::BlobStore;
 use harness_tools::{
-    ToolArgumentValidator, ToolDefinition, ToolExecutor, ToolPolicy, ToolRegistration, ToolRegistry,
+    IdempotencySupport, ToolArgumentValidator, ToolDefinition, ToolExecutor, ToolPolicy,
+    ToolRegistration, ToolRegistry,
 };
-use harness_types::ProviderId;
+use harness_types::{BlobRef, ProviderId};
 
-use crate::{HarnessRuntimeBuildError, LlmRegistry, ProviderRegistry};
+use crate::{
+    EXECUTION_COMPOSITION_MEDIA_TYPE, EXECUTION_COMPOSITION_SCHEMA_VERSION,
+    ExecutionCompositionSnapshot, ExecutionModelComposition, ExecutionToolComposition,
+    HarnessRuntimeBuildError, LlmRegistry, ProviderRegistry,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelBinding {
@@ -112,6 +117,7 @@ pub(crate) struct CompiledAgentProfile {
     pub llm_runtime: AgentLlmRuntime,
     pub tool_runtime: AgentToolRuntime,
     pub actor_config: AgentActorConfig,
+    pub composition: BlobRef,
 }
 
 /// Immutable profile catalog compiled against the provider manifests available
@@ -209,6 +215,20 @@ async fn compile_profile(
             model: profile.model.model,
         });
     };
+    let model_provider_version = providers
+        .manifest(&profile.model.provider)
+        .expect("ProviderRegistry contains every configured model provider")
+        .provider_version
+        .clone();
+    let composition_model = ExecutionModelComposition {
+        provider: profile.model.provider.clone(),
+        provider_version: model_provider_version,
+        model: profile.model.model.clone(),
+        system: profile.model.system.clone(),
+        options: profile.model.options.clone(),
+        timeout_ms: profile.model.timeout_ms,
+    };
+    let policy_identity = profile.policy.composition_identity();
 
     let request_config = ModelRequestConfig {
         provider: profile.model.provider.clone(),
@@ -218,7 +238,7 @@ async fn compile_profile(
         options: profile.model.options,
     };
     let llm_provider: Arc<dyn LlmProvider> = llm_adapter;
-    let llm_runtime = AgentLlmRuntime::new(request_config, llm_provider, blob_store)
+    let llm_runtime = AgentLlmRuntime::new(request_config, llm_provider, blob_store.clone())
         .map_err(|source| HarnessRuntimeBuildError::LlmRuntime {
             profile: profile_name.to_owned(),
             source: Box::new(source),
@@ -230,8 +250,15 @@ async fn compile_profile(
         })?;
 
     let mut registrations = Vec::with_capacity(profile.tools.len());
+    let mut composition_tools = Vec::with_capacity(profile.tools.len());
     for binding in profile.tools {
         let tool_name = binding.definition.name.clone();
+        let provider_version = providers
+            .manifest(&binding.provider)
+            .expect("ProviderRegistry contains every configured Tool provider")
+            .provider_version
+            .clone();
+        let validator_identity = binding.validator.composition_identity();
         let Some(host) = providers.host(&binding.provider) else {
             return Err(HarnessRuntimeBuildError::ProfileProviderNotFound {
                 profile: profile_name.to_owned(),
@@ -245,6 +272,13 @@ async fn compile_profile(
                 tool: tool_name,
                 source: Box::new(source),
             })?;
+        composition_tools.push(ExecutionToolComposition {
+            definition: binding.definition.clone(),
+            provider: binding.provider.clone(),
+            provider_version,
+            supports_idempotency_key: adapter.idempotency_support() == IdempotencySupport::Keyed,
+            validator_identity,
+        });
         let executor: Arc<dyn ToolExecutor> = Arc::new(adapter);
         let registration = ToolRegistration::new(binding.definition, executor, binding.validator)
             .map_err(|source| HarnessRuntimeBuildError::ToolRegistry {
@@ -270,9 +304,37 @@ async fn compile_profile(
         source: Box::new(source),
     })?;
 
+    let composition_snapshot = ExecutionCompositionSnapshot {
+        schema_version: EXECUTION_COMPOSITION_SCHEMA_VERSION,
+        profile: profile_name.to_owned(),
+        model: composition_model,
+        tools: composition_tools,
+        policy_identity,
+        max_automatic_tool_attempts: profile.max_automatic_tool_attempts,
+    };
+    let composition_bytes = composition_snapshot.snapshot_bytes().map_err(|source| {
+        HarnessRuntimeBuildError::CompositionSnapshotSerialize {
+            profile: profile_name.to_owned(),
+            source: Box::new(source),
+        }
+    })?;
+    let composition = blob_store
+        .put(
+            composition_bytes,
+            Some(EXECUTION_COMPOSITION_MEDIA_TYPE.to_owned()),
+        )
+        .await
+        .map_err(
+            |source| HarnessRuntimeBuildError::CompositionSnapshotStore {
+                profile: profile_name.to_owned(),
+                source: Box::new(source),
+            },
+        )?;
+
     Ok(CompiledAgentProfile {
         llm_runtime,
         tool_runtime,
         actor_config: profile.actor_config,
+        composition,
     })
 }

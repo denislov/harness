@@ -8,8 +8,9 @@ use harness_types::{
 use thiserror::Error;
 
 use crate::{
-    ApprovalRequested, ApprovalResolved, ModelRequested, RecoveryBlocked, SessionEvent,
-    SessionEventPayload, StepEndReason, ToolCallRecorded, ToolDispatched, TurnEndReason,
+    ApprovalRequested, ApprovalResolved, CompositionActivated, ModelRequested, RecoveryBlocked,
+    SessionEvent, SessionEventPayload, StepEndReason, ToolCallRecorded, ToolDispatched,
+    TurnEndReason,
 };
 
 pub const SESSION_PROJECTION_VERSION_V1: u16 = 1;
@@ -52,6 +53,13 @@ pub struct LifecycleProjection {
     pub last_started_step: Option<StepPosition>,
     pub last_ended_step: Option<StepPosition>,
     pub last_ended_step_reason: Option<StepEndReason>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveComposition {
+    pub event_id: EventId,
+    pub seq: EventSeq,
+    pub data: CompositionActivated,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +125,7 @@ pub struct SessionProjection {
     pub model_messages: Vec<Message>,
     pub inbox: InboxProjection,
     pub lifecycle: LifecycleProjection,
+    pub active_composition: Option<ActiveComposition>,
     pub open_step_assistant_message: Option<MessageId>,
     pub open_step_tools: OpenStepToolProjection,
     pub last_model_request: Option<ModelRequested>,
@@ -207,6 +216,9 @@ impl ProjectorState {
     fn apply(&mut self, event: &SessionEvent) -> Result<(), ProjectionError> {
         match event.payload() {
             SessionEventPayload::SessionCreated(_) => self.apply_session_created(event),
+            SessionEventPayload::CompositionActivated(data) => {
+                self.apply_composition_activated(event, data)
+            }
             SessionEventPayload::InboxEnqueued(data) => {
                 let message_id = data.message.id.clone();
                 if !self.seen_inbox_ids.insert(message_id.clone()) {
@@ -583,6 +595,36 @@ impl ProjectorState {
         if event.seq() != EventSeq::FIRST {
             return self.invalid(event, "session/created must be the first committed event");
         }
+        Ok(())
+    }
+
+    fn apply_composition_activated(
+        &mut self,
+        event: &SessionEvent,
+        data: &CompositionActivated,
+    ) -> Result<(), ProjectionError> {
+        if data.profile.trim().is_empty() {
+            return self.invalid(event, "composition/activated profile must not be empty");
+        }
+        if self.projection.lifecycle.open_turn.is_some()
+            || self.projection.lifecycle.open_step.is_some()
+            || self.projection.pending_model_request.is_some()
+            || self.projection.pending_approval.is_some()
+            || !self.projection.pending_tool_calls.is_empty()
+            || !self.projection.pending_tool_dispatches.is_empty()
+            || self.projection.unresolved_recovery.is_some()
+        {
+            return self.invalid(
+                event,
+                "composition/activated is only legal at a quiescent durable boundary",
+            );
+        }
+
+        self.projection.active_composition = Some(ActiveComposition {
+            event_id: event.event_id().clone(),
+            seq: event.seq(),
+            data: data.clone(),
+        });
         Ok(())
     }
 

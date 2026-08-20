@@ -6,6 +6,7 @@
 
 mod agent_registry;
 mod builder;
+mod composition;
 mod config;
 mod credential;
 mod error;
@@ -18,6 +19,10 @@ mod runtime_event;
 
 pub use agent_registry::AgentRegistry;
 pub use builder::HarnessRuntimeBuilder;
+pub use composition::{
+    EXECUTION_COMPOSITION_MEDIA_TYPE, EXECUTION_COMPOSITION_SCHEMA_VERSION,
+    ExecutionCompositionSnapshot, ExecutionModelComposition, ExecutionToolComposition,
+};
 pub use config::{HarnessRuntimeInfo, ProviderProcessSpec};
 pub use credential::{
     CredentialKey, CredentialKeyError, CredentialResolveError, CredentialResolver,

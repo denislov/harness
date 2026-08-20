@@ -218,6 +218,8 @@ impl SessionEvent {
 pub enum SessionEventPayload {
     #[serde(rename = "session/created")]
     SessionCreated(SessionCreated),
+    #[serde(rename = "composition/activated")]
+    CompositionActivated(CompositionActivated),
     #[serde(rename = "inbox/enqueued")]
     InboxEnqueued(InboxEnqueued),
     #[serde(rename = "inbox/claimed")]
@@ -260,6 +262,13 @@ pub enum SessionEventPayload {
 pub struct SessionCreated {
     #[serde(default, flatten)]
     pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositionActivated {
+    pub profile: String,
+    pub snapshot: BlobRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -477,6 +486,7 @@ fn validate_event_shape(
 
     match payload {
         SessionEventPayload::SessionCreated(_)
+        | SessionEventPayload::CompositionActivated(_)
         | SessionEventPayload::InboxEnqueued(_)
         | SessionEventPayload::InboxDiscarded(_)
         | SessionEventPayload::RecoveryResolved(_) => {
@@ -570,6 +580,7 @@ impl SessionEventPayload {
     {
         match self {
             Self::SessionCreated(data) => map.serialize_entry("data", data),
+            Self::CompositionActivated(data) => map.serialize_entry("data", data),
             Self::InboxEnqueued(data) => map.serialize_entry("data", data),
             Self::InboxClaimed(data) => map.serialize_entry("data", data),
             Self::InboxDiscarded(data) => map.serialize_entry("data", data),
@@ -596,6 +607,7 @@ impl SessionEventPayload {
     pub const fn event_type(&self) -> &'static str {
         match self {
             Self::SessionCreated(_) => "session/created",
+            Self::CompositionActivated(_) => "composition/activated",
             Self::InboxEnqueued(_) => "inbox/enqueued",
             Self::InboxClaimed(_) => "inbox/claimed",
             Self::InboxDiscarded(_) => "inbox/discarded",

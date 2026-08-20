@@ -1067,3 +1067,18 @@ See `spec/batch-14-runtime-composition.md` for the complete contract.
 - Adds scoped Runtime composition while preserving the existing unscoped `RuntimePlan::runtime_builder()` compatibility path.
 - Adds offline `harness config resolve` and `harness run --workspace`.
 - Does not add dynamic config hot reload or a durable scope-snapshot SessionEvent.
+
+
+## Batch 19 spec delta — Durable Execution Composition Epochs
+
+- Adds durable `composition/activated { profile, snapshot }` SessionEvent at quiescent execution boundaries.
+- Adds immutable `ExecutionCompositionSnapshot` v1 Blobs; Blob SHA-256/size, not BlobId, identify equal composition bytes.
+- Snapshots cover resolved model semantics, enabled Core Tool definitions, provider manifest versions, keyed-idempotency support, validator/policy identities, and automatic Tool retry budget.
+- `HarnessRuntime::open_agent` must verify the active snapshot and reconcile composition before spawning the Agent.
+- Same composition may resume unfinished work. Composition drift while work is unfinished fails closed and performs no Session mutation.
+- Quiescent Sessions may durably activate a new composition before new execution starts.
+- Quiescent pre-Batch-19 Sessions may receive their first activation; unfinished legacy Sessions without an activation are rejected as unbound.
+- Credentials and secret values remain non-durable and are excluded from composition snapshots.
+- Provider supervision/restart remains deferred; provider availability recovery must not own Tool retry safety.
+
+See `spec/batch-19-durable-execution-composition.md`.

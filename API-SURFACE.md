@@ -1913,3 +1913,42 @@ RuntimePlan::runtime_builder_for_scope(...)
 harness config resolve [--profile NAME] [--workspace NAME] [--session SESSION_ID] [--json]
 harness run SESSION_ID [--profile NAME] [--workspace NAME]
 ```
+
+
+## Batch 19 API surface
+
+### `harness-session`
+
+New durable event payload and projection:
+
+```rust
+CompositionActivated { profile, snapshot }
+ActiveComposition
+SessionProjection::active_composition
+```
+
+The event type is `composition/activated` and is valid only at a quiescent durable boundary.
+
+### `harness-tools`
+
+`ToolPolicy` and `ToolArgumentValidator` gain source-compatible default methods:
+
+```rust
+fn composition_identity(&self) -> String
+```
+
+Built-in file-configured validation and `AllowAllToolPolicy` return explicit stable identities.
+
+### `harness-runtime`
+
+New durable snapshot vocabulary:
+
+```rust
+ExecutionCompositionSnapshot
+ExecutionModelComposition
+ExecutionToolComposition
+EXECUTION_COMPOSITION_SCHEMA_VERSION
+EXECUTION_COMPOSITION_MEDIA_TYPE
+```
+
+`HarnessRuntime::open_agent` now reconciles the requested compiled profile against the latest durable composition before Agent spawn. New error variants include `CompositionBootstrap`, `CompositionSnapshotVerify`, `LegacyCompositionUnbound`, `CompositionDrift`, and `CompositionInvariant`.

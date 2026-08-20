@@ -1234,3 +1234,12 @@ Batch 18 adds deterministic application-level scope resolution without changing 
 Profiles remain the concrete capability contract: ToolDefinitions still live in the profile/Core configuration, while scope `enable`/`disable` directives only change visibility of those declared Tools. Provider manifests never become ToolDefinitions.
 
 Use `harness config resolve --profile <name> --workspace <name> [--session <id>] --json` to inspect the exact resolved model, prompt fragments, enabled Tools, and layer trace without starting Providers. `harness run` accepts `--workspace` and automatically uses configured session profile/workspace bindings when present.
+
+
+# Harness API Batch 19
+
+Batch 19 adds durable execution-composition epochs. Every compiled Agent profile is serialized as an immutable `ExecutionCompositionSnapshot` Blob containing the resolved model route/options/system prompt, enabled Tool definitions and provider versions, validator/policy identities, idempotency support, and automatic retry budget.
+
+Before an Agent is spawned, `HarnessRuntime` verifies and reconciles that compiled snapshot with the Session's latest durable `composition/activated` event. Quiescent Sessions may activate a new snapshot; unfinished work must resume under the same snapshot or opening fails closed with `CompositionDrift`. Pre-Batch-19 Sessions with unfinished work and no activation fail as `LegacyCompositionUnbound`.
+
+The composition event is deliberately small: it records only the profile name and BlobRef. Credentials remain outside durable Session state, and per-model-request snapshots remain the exact audit record of each request. See `spec/batch-19-durable-execution-composition.md`.
