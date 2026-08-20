@@ -4,6 +4,8 @@ use harness_types::SideEffectClass;
 use serde::Deserialize;
 
 pub const HARNESS_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub(crate) const DEFAULT_MODEL_TIMEOUT_MS: u64 = 120_000;
+pub(crate) const DEFAULT_MAX_AUTOMATIC_TOOL_ATTEMPTS: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct HarnessConfig {
@@ -17,7 +19,13 @@ pub struct HarnessConfig {
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
+    pub global: ScopeConfig,
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, ScopeConfig>,
+    #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
+    #[serde(default)]
+    pub sessions: BTreeMap<String, SessionScopeConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -28,6 +36,8 @@ pub struct RuntimeConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub default_profile: Option<String>,
+    #[serde(default)]
+    pub default_workspace: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -36,6 +46,7 @@ impl Default for RuntimeConfig {
             name: default_runtime_name(),
             data_dir: default_data_dir(),
             default_profile: None,
+            default_workspace: None,
         }
     }
 }
@@ -75,14 +86,69 @@ pub struct ProviderConfig {
     pub stderr_history_lines: usize,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ScopeConfig {
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub system_mode: PromptMode,
+    #[serde(default)]
+    pub model: ScopeModelConfig,
+    #[serde(default)]
+    pub capabilities: CapabilityScopeConfig,
+    #[serde(default)]
+    pub policy: Option<PolicyConfig>,
+    #[serde(default)]
+    pub max_automatic_tool_attempts: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SessionScopeConfig {
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(flatten)]
+    pub scope: ScopeConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptMode {
+    #[default]
+    Append,
+    Replace,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ScopeModelConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CapabilityScopeConfig {
+    #[serde(default)]
+    pub enable: Vec<String>,
+    #[serde(default)]
+    pub disable: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProfileConfig {
     pub model: ModelConfig,
     #[serde(default)]
     pub tools: Vec<ToolConfig>,
-    pub policy: PolicyConfig,
-    #[serde(default = "default_max_automatic_tool_attempts")]
-    pub max_automatic_tool_attempts: u32,
+    #[serde(default)]
+    pub policy: Option<PolicyConfig>,
+    #[serde(default)]
+    pub max_automatic_tool_attempts: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -91,8 +157,8 @@ pub struct ModelConfig {
     pub model: String,
     #[serde(default)]
     pub system: Option<String>,
-    #[serde(default = "default_model_timeout_ms")]
-    pub timeout_ms: u64,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
 }
@@ -112,6 +178,8 @@ pub struct ToolConfig {
     pub side_effect: SideEffectClass,
     #[serde(default = "default_tool_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -142,14 +210,6 @@ const fn default_max_stdout_line_bytes() -> usize {
 
 const fn default_stderr_history_lines() -> usize {
     128
-}
-
-const fn default_max_automatic_tool_attempts() -> u32 {
-    2
-}
-
-const fn default_model_timeout_ms() -> u64 {
-    120_000
 }
 
 const fn default_tool_timeout_ms() -> u64 {

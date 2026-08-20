@@ -1226,3 +1226,11 @@ Key additions:
 - explicit separation between lossy operational RuntimeEvents and durable SessionEvents.
 
 See `spec/batch-17-credentials-runtime-events.md` for normative semantics.
+
+## Batch 18 — hierarchical scope configuration
+
+Batch 18 adds deterministic application-level scope resolution without changing the Agent state machine or SessionEvent schema. `harness.toml` can now express `global -> workspace -> profile -> session` overlays for system prompts, model options, Tool visibility, policy, and automatic Tool-attempt limits.
+
+Profiles remain the concrete capability contract: ToolDefinitions still live in the profile/Core configuration, while scope `enable`/`disable` directives only change visibility of those declared Tools. Provider manifests never become ToolDefinitions.
+
+Use `harness config resolve --profile <name> --workspace <name> [--session <id>] --json` to inspect the exact resolved model, prompt fragments, enabled Tools, and layer trace without starting Providers. `harness run` accepts `--workspace` and automatically uses configured session profile/workspace bindings when present.

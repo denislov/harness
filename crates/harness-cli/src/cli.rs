@@ -34,6 +34,22 @@ pub struct ConfigArgs {
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     Check,
+    Resolve(ResolveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    #[arg(long)]
+    pub workspace: Option<String>,
+
+    #[arg(long)]
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -53,6 +69,9 @@ pub struct RunArgs {
 
     #[arg(long)]
     pub profile: Option<String>,
+
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -9,15 +9,20 @@ mod error;
 mod loader;
 mod model;
 mod plan;
+mod scope;
 
 pub use credentials::EnvironmentCredentialResolver;
 pub use error::HarnessConfigError;
 pub use loader::LoadedHarnessConfig;
 pub use model::{
-    CredentialConfig, HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig, ModelConfig,
-    ObservabilityConfig, PolicyConfig, ProfileConfig, ProviderConfig, RuntimeConfig, ToolConfig,
+    CapabilityScopeConfig, CredentialConfig, HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig,
+    ModelConfig, ObservabilityConfig, PolicyConfig, ProfileConfig, PromptMode, ProviderConfig,
+    RuntimeConfig, ScopeConfig, ScopeModelConfig, SessionScopeConfig, ToolConfig,
 };
 pub use plan::RuntimePlan;
+pub use scope::{
+    PromptFragmentTrace, ResolvedModelTrace, ResolvedScope, ScopeResolutionTrace, ScopeSelection,
+};
 
 #[cfg(test)]
 mod tests {
@@ -214,6 +219,176 @@ default_profile = "missing"
             Ok(_) => panic!("config unexpectedly compiled"),
             Err(error) => error,
         };
+        assert!(matches!(error, HarnessConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn resolves_global_workspace_profile_and_session_layers() {
+        let path = temp_config(
+            r#"
+schema_version = 1
+
+[runtime]
+default_profile = "default"
+default_workspace = "repo"
+
+[[providers]]
+id = "provider"
+program = "provider"
+
+[global]
+system = "global prompt"
+
+[global.model]
+timeout_ms = 9000
+
+[global.capabilities]
+disable = ["echo"]
+
+[workspaces.repo]
+system = "workspace prompt"
+
+[workspaces.repo.model]
+timeout_ms = 7000
+
+[workspaces.repo.capabilities]
+enable = ["echo"]
+
+[profiles.default]
+policy = "allow-all"
+
+[profiles.default.model]
+provider = "provider"
+model = "model"
+system = "profile prompt"
+
+[[profiles.default.tools]]
+name = "echo"
+provider = "provider"
+version = "1"
+description = "Echo"
+side_effect = "read-only"
+enabled = false
+
+[sessions.ses_scope_test]
+profile = "default"
+workspace = "repo"
+system = "session prompt"
+
+[sessions.ses_scope_test.model]
+max_output_tokens = 64
+
+[sessions.ses_scope_test.capabilities]
+enable = ["echo"]
+"#,
+        );
+        let plan = LoadedHarnessConfig::load(path).unwrap().compile().unwrap();
+        let session_id = harness_types::SessionId::new("ses_scope_test").unwrap();
+        let resolved = plan
+            .resolve_scope(
+                ScopeSelection::new("default")
+                    .with_workspace("repo")
+                    .with_session(session_id),
+            )
+            .unwrap();
+        let trace = resolved.trace();
+        assert_eq!(
+            trace.layers,
+            vec![
+                "global".to_owned(),
+                "workspace:repo".to_owned(),
+                "profile:default".to_owned(),
+                "session:ses_scope_test".to_owned(),
+            ]
+        );
+        assert_eq!(
+            trace.system_prompt.as_deref(),
+            Some("global prompt\n\nworkspace prompt\n\nprofile prompt\n\nsession prompt")
+        );
+        assert_eq!(trace.model.timeout_ms, 7000);
+        assert_eq!(trace.model.max_output_tokens, Some(64));
+        assert_eq!(trace.enabled_tools, vec!["echo".to_owned()]);
+        assert!(trace.disabled_tools.is_empty());
+        assert_eq!(
+            plan.session_profile(resolved.session_id().unwrap()),
+            Some("default")
+        );
+        assert_eq!(
+            plan.session_workspace(resolved.session_id().unwrap()),
+            Some("repo")
+        );
+    }
+
+    #[test]
+    fn workspace_prompt_can_replace_earlier_prompt_fragments() {
+        let path = temp_config(
+            r#"
+schema_version = 1
+
+[[providers]]
+id = "provider"
+program = "provider"
+
+[global]
+system = "global prompt"
+
+[workspaces.repo]
+system = "workspace prompt"
+system_mode = "replace"
+
+[profiles.default]
+policy = "allow-all"
+
+[profiles.default.model]
+provider = "provider"
+model = "model"
+system = "profile prompt"
+"#,
+        );
+        let plan = LoadedHarnessConfig::load(path).unwrap().compile().unwrap();
+        let resolved = plan
+            .resolve_scope(ScopeSelection::new("default").with_workspace("repo"))
+            .unwrap();
+        assert_eq!(
+            resolved.trace().system_prompt.as_deref(),
+            Some("workspace prompt\n\nprofile prompt")
+        );
+    }
+
+    #[test]
+    fn session_scope_binding_rejects_conflicting_profile() {
+        let path = temp_config(
+            r#"
+schema_version = 1
+
+[[providers]]
+id = "provider"
+program = "provider"
+
+[profiles.default]
+policy = "allow-all"
+[profiles.default.model]
+provider = "provider"
+model = "model"
+
+[profiles.other]
+policy = "allow-all"
+[profiles.other.model]
+provider = "provider"
+model = "model"
+
+[sessions.ses_bound]
+profile = "default"
+"#,
+        );
+        let plan = LoadedHarnessConfig::load(path).unwrap().compile().unwrap();
+        let error = plan
+            .resolve_scope(
+                ScopeSelection::new("other")
+                    .with_session(harness_types::SessionId::new("ses_bound").unwrap()),
+            )
+            .err()
+            .expect("conflicting session binding should fail");
         assert!(matches!(error, HarnessConfigError::Invalid(_)));
     }
 }

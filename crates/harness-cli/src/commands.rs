@@ -4,7 +4,7 @@ use std::{
 };
 
 use harness_agent::{AgentHandle, AgentState, ExecutionGate};
-use harness_config::{LoadedHarnessConfig, RuntimePlan};
+use harness_config::{LoadedHarnessConfig, ResolvedScope, RuntimePlan, ScopeSelection};
 use harness_runtime::{HarnessRuntime, RuntimeEventBus};
 use harness_session::{
     CreateSession, SessionCreated, SessionEvent, SessionEventPayload, SessionStore,
@@ -13,7 +13,7 @@ use harness_storage_local::DurableLocalStorage;
 use harness_types::{ContentBlock, EventSeq, Message, MessageSource, Role, SessionId};
 
 use crate::{
-    cli::{Cli, Command, ConfigCommand, InspectArgs, RunArgs, SessionCommand},
+    cli::{Cli, Command, ConfigCommand, InspectArgs, ResolveArgs, RunArgs, SessionCommand},
     error::CliError,
     identity::UuidIdentitySource,
     observability::RuntimeEventLog,
@@ -34,6 +34,7 @@ pub async fn execute(cli: Cli) -> Result<(), CliError> {
                 config_check(&loaded, &plan);
                 Ok(())
             }
+            ConfigCommand::Resolve(args) => config_resolve(args, &plan),
         },
         Command::Session(args) => match args.command {
             SessionCommand::Create => session_create(&plan).await,
@@ -45,16 +46,55 @@ pub async fn execute(cli: Cli) -> Result<(), CliError> {
 
 fn config_check(loaded: &LoadedHarnessConfig, plan: &RuntimePlan) {
     println!(
-        "config ok: {} (providers={}, profiles={}, credentials={}, data_dir={}, runtime_events={})",
+        "config ok: {} (providers={}, profiles={}, workspaces={}, session_scopes={}, credentials={}, data_dir={}, runtime_events={})",
         loaded.source_path().display(),
         plan.provider_count(),
         plan.profile_count(),
+        plan.workspace_count(),
+        plan.session_scope_count(),
         plan.credential_count(),
         plan.data_dir().display(),
         plan.runtime_events_jsonl()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "disabled".to_owned())
     );
+}
+
+fn config_resolve(args: ResolveArgs, plan: &RuntimePlan) -> Result<(), CliError> {
+    let session_id = args.session.map(parse_session_id).transpose()?;
+    let resolved = resolve_scope_target(args.profile, args.workspace, session_id.as_ref(), plan)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(resolved.trace())
+                .map_err(|error| CliError::ScopeSerialize(Box::new(error)))?
+        );
+    } else {
+        let trace = resolved.trace();
+        println!(
+            "scope profile={} workspace={} session={}",
+            trace.profile,
+            trace.workspace.as_deref().unwrap_or("-"),
+            trace.session_id.as_deref().unwrap_or("-")
+        );
+        println!("layers: {}", trace.layers.join(" -> "));
+        println!(
+            "model: {}/{} timeout_ms={} max_output_tokens={}",
+            trace.model.provider,
+            trace.model.model,
+            trace.model.timeout_ms,
+            trace
+                .model
+                .max_output_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_owned())
+        );
+        println!("tools: {}", trace.enabled_tools.join(", "));
+        if let Some(system) = &trace.system_prompt {
+            println!("system:\n{system}");
+        }
+    }
+    Ok(())
 }
 
 async fn session_create(plan: &RuntimePlan) -> Result<(), CliError> {
@@ -101,13 +141,14 @@ async fn inspect(args: InspectArgs, plan: &RuntimePlan) -> Result<(), CliError> 
 }
 
 async fn run(args: RunArgs, plan: &RuntimePlan) -> Result<(), CliError> {
-    let (session_id, profile) = resolve_run_target(args, plan)?;
+    let session_id = parse_session_id(args.session_id)?;
+    let resolved = resolve_scope_target(args.profile, args.workspace, Some(&session_id), plan)?;
     let events = RuntimeEventBus::default();
     let event_log = plan
         .runtime_events_jsonl()
         .map(|path| RuntimeEventLog::start(path, &events))
         .transpose()?;
-    let result = run_with_events(session_id, profile, plan, events).await;
+    let result = run_with_events(session_id, resolved, plan, events).await;
     let observation = match event_log {
         Some(log) => log.stop().await,
         None => Ok(()),
@@ -117,29 +158,53 @@ async fn run(args: RunArgs, plan: &RuntimePlan) -> Result<(), CliError> {
     Ok(())
 }
 
-fn resolve_run_target(args: RunArgs, plan: &RuntimePlan) -> Result<(SessionId, String), CliError> {
-    let session_id = parse_session_id(args.session_id)?;
-    let profile = args
-        .profile
+fn resolve_scope_target(
+    requested_profile: Option<String>,
+    requested_workspace: Option<String>,
+    session_id: Option<&SessionId>,
+    plan: &RuntimePlan,
+) -> Result<ResolvedScope, CliError> {
+    let profile = requested_profile
         .as_deref()
+        .or_else(|| session_id.and_then(|id| plan.session_profile(id)))
         .or_else(|| plan.default_profile())
         .ok_or(CliError::MissingProfile)?
         .to_owned();
     if !plan.contains_profile(&profile) {
         return Err(CliError::ProfileNotFound(profile));
     }
-    Ok((session_id, profile))
+
+    let workspace = requested_workspace
+        .as_deref()
+        .or_else(|| session_id.and_then(|id| plan.session_workspace(id)))
+        .or_else(|| plan.default_workspace())
+        .map(str::to_owned);
+    if let Some(workspace) = &workspace
+        && !plan.contains_workspace(workspace)
+    {
+        return Err(CliError::WorkspaceNotFound(workspace.clone()));
+    }
+
+    let mut selection = ScopeSelection::new(profile);
+    if let Some(workspace) = workspace {
+        selection = selection.with_workspace(workspace);
+    }
+    if let Some(session_id) = session_id {
+        selection = selection.with_session(session_id.clone());
+    }
+    plan.resolve_scope(selection)
+        .map_err(|error| CliError::Config(Box::new(error)))
 }
 
 async fn run_with_events(
     session_id: SessionId,
-    profile: String,
+    resolved: ResolvedScope,
     plan: &RuntimePlan,
     events: RuntimeEventBus,
 ) -> Result<(), CliError> {
     let identity = Arc::new(UuidIdentitySource);
     let builder = plan
-        .runtime_builder(identity.clone(), identity.clone())
+        .runtime_builder_for_scope(&resolved, identity.clone(), identity.clone())
         .map_err(|error| CliError::RuntimeBuild(Box::new(error)))?
         .runtime_event_bus(events);
     let runtime = builder
@@ -147,6 +212,8 @@ async fn run_with_events(
         .await
         .map_err(|error| CliError::RuntimeBuild(Box::new(error)))?;
 
+    let profile = resolved.profile_name().to_owned();
+    let workspace = resolved.workspace().map(str::to_owned);
     let handle = match runtime.open_agent(session_id.clone(), &profile).await {
         Ok(handle) => handle,
         Err(error) => {
@@ -155,8 +222,15 @@ async fn run_with_events(
         }
     };
 
-    let interaction =
-        interactive_loop(&runtime, &handle, &session_id, &profile, identity.as_ref()).await;
+    let interaction = interactive_loop(
+        &runtime,
+        &handle,
+        &session_id,
+        &profile,
+        workspace.as_deref(),
+        identity.as_ref(),
+    )
+    .await;
     let close = runtime.close_agent(&session_id).await;
     let shutdown = runtime.shutdown().await;
 
@@ -171,10 +245,14 @@ async fn interactive_loop(
     handle: &AgentHandle,
     session_id: &SessionId,
     profile: &str,
+    workspace: Option<&str>,
     identity: &UuidIdentitySource,
 ) -> Result<(), CliError> {
     wait_for_turn(handle).await?;
-    println!("session {session_id} profile {profile}; /quit to exit");
+    println!(
+        "session {session_id} profile {profile} workspace {}; /quit to exit",
+        workspace.unwrap_or("-")
+    );
     let stdin = io::stdin();
     loop {
         print!("> ");

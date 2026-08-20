@@ -1056,3 +1056,14 @@ See `spec/batch-14-runtime-composition.md` for the complete contract.
 7. Runtime/Provider/Agent lifecycle transitions publish typed RuntimeEvents; arbitrary underlying error strings are omitted from those events.
 8. The CLI may append RuntimeEvents to JSONL, but observer lag/failure does not change Agent or Session semantics.
 9. Batch 16 `HarnessRuntimeInfo` construction is changed to struct-update initialization to satisfy `clippy::field_reassign_with_default` without lint suppression.
+
+## Batch 18 spec delta — Scope / Prompt / Capability Configuration
+
+- Adds deterministic configuration resolution order `global -> workspace -> profile -> session`.
+- Keeps profile/Core ToolDefinitions authoritative; scope capability directives only enable/disable profile-declared Tools.
+- Defines prompt `append`/`replace` semantics and exact `\n\n` fragment joining.
+- Adds workspace defaults and session-scoped profile/workspace bindings to `harness.toml` schema version 1.
+- Adds `ScopeSelection`, `ResolvedScope`, and a serializable non-durable resolution trace.
+- Adds scoped Runtime composition while preserving the existing unscoped `RuntimePlan::runtime_builder()` compatibility path.
+- Adds offline `harness config resolve` and `harness run --workspace`.
+- Does not add dynamic config hot reload or a durable scope-snapshot SessionEvent.

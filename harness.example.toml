@@ -4,6 +4,17 @@ schema_version = 1
 name = "harness-cli"
 data_dir = ".harness"
 default_profile = "default"
+default_workspace = "local"
+
+# Scope overlays are resolved in order: global -> workspace -> profile -> session.
+[global]
+system = "Follow the Harness runtime and tool policy configured for this deployment."
+
+[workspaces.local]
+system = "You are operating in the local example workspace."
+
+[workspaces.local.capabilities]
+enable = ["echo"]
 
 [observability]
 runtime_events_jsonl = ".harness/runtime-events.jsonl"

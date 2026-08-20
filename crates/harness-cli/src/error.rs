@@ -32,6 +32,12 @@ pub enum CliError {
     #[error("Agent profile {0:?} is not configured")]
     ProfileNotFound(String),
 
+    #[error("workspace {0:?} is not configured")]
+    WorkspaceNotFound(String),
+
+    #[error("failed to serialize resolved scope: {0}")]
+    ScopeSerialize(#[source] Box<serde_json::Error>),
+
     #[error("session is waiting for an approval; CLI run cannot continue interactively")]
     ApprovalPending,
 

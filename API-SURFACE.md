@@ -1871,3 +1871,45 @@ fn runtime_events_jsonl(&self) -> Option<&Path>
 ## `harness-cli`
 
 No new command is introduced. `run` optionally starts the configured RuntimeEvent JSONL recorder; `config check`, `session create`, and `inspect` remain offline with respect to Provider and credential resolution.
+
+## Batch 18 API surface
+
+### `harness-config`
+
+New public configuration types:
+
+```rust
+ScopeConfig
+ScopeModelConfig
+CapabilityScopeConfig
+SessionScopeConfig
+PromptMode
+```
+
+New resolution API:
+
+```rust
+ScopeSelection
+ResolvedScope
+ScopeResolutionTrace
+PromptFragmentTrace
+ResolvedModelTrace
+
+RuntimePlan::default_workspace()
+RuntimePlan::workspace_count()
+RuntimePlan::session_scope_count()
+RuntimePlan::contains_workspace(...)
+RuntimePlan::session_profile(...)
+RuntimePlan::session_workspace(...)
+RuntimePlan::resolve_scope(...)
+RuntimePlan::runtime_builder_for_scope(...)
+```
+
+`ProfileConfig.policy` and `ProfileConfig.max_automatic_tool_attempts` are optional overlays whose final values are resolved across scopes. `ModelConfig.timeout_ms` is likewise an optional overlay. `ToolConfig.enabled` can explicitly override broader capability visibility.
+
+### `harness-cli`
+
+```text
+harness config resolve [--profile NAME] [--workspace NAME] [--session SESSION_ID] [--json]
+harness run SESSION_ID [--profile NAME] [--workspace NAME]
+```

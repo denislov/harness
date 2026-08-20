@@ -41,6 +41,12 @@ schema_version = 1
 data_dir = "state"
 default_profile = "default"
 
+[global]
+system = "global prompt"
+
+[workspaces.repo]
+system = "workspace prompt"
+
 [observability]
 runtime_events_jsonl = "runtime-events.jsonl"
 
@@ -64,7 +70,7 @@ max_automatic_tool_attempts = 2
 [profiles.default.model]
 provider = "example-python"
 model = "agent-model"
-system = "Use the echo tool, then answer with its result."
+system = "profile prompt. Use the echo tool, then answer with its result."
 timeout_ms = 5000
 max_output_tokens = 256
 
@@ -84,6 +90,15 @@ input_schema = {{ type = "object", properties = {{ text = {{ type = "string" }} 
     let path = root.join("harness.toml");
     fs::write(&path, config).unwrap();
     path
+}
+
+fn bind_session_scope(config: &Path, session_id: &str) {
+    let mut file = fs::OpenOptions::new().append(true).open(config).unwrap();
+    writeln!(
+        file,
+        "\n[sessions.\"{session_id}\"]\nprofile = \"default\"\nworkspace = \"repo\"\nsystem = \"session prompt\"\n"
+    )
+    .unwrap();
 }
 
 fn harness(config: &Path) -> Command {
@@ -134,6 +149,29 @@ fn config_session_run_and_inspect_form_a_durable_cli_shell() {
     );
     let session_id = String::from_utf8(created.stdout).unwrap().trim().to_owned();
     assert!(session_id.starts_with("ses_"));
+    bind_session_scope(&config, &session_id);
+
+    let resolved = harness(&config)
+        .args([
+            "config",
+            "resolve",
+            "--session",
+            session_id.as_str(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        resolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved.stderr)
+    );
+    let resolved_scope = String::from_utf8(resolved.stdout).unwrap();
+    assert!(resolved_scope.contains("global"));
+    assert!(resolved_scope.contains("workspace:repo"));
+    assert!(resolved_scope.contains("profile:default"));
+    assert!(resolved_scope.contains(&format!("session:{session_id}")));
+    assert!(resolved_scope.contains("global prompt\\n\\nworkspace prompt\\n\\nprofile prompt"));
 
     let first = run_interactive(&config, &session_id, "hello from cli\n/quit\n");
     assert!(

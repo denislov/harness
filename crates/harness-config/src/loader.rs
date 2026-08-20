@@ -6,19 +6,19 @@ use std::{
     time::Duration,
 };
 
-use harness_llm::ModelOptions;
 use harness_runtime::{
-    AgentProfile, CredentialKey, CredentialResolver, HarnessRuntimeInfo, ModelBinding,
-    ProviderProcessSpec, RuntimeToolBinding,
+    CredentialKey, CredentialResolver, HarnessRuntimeInfo, ProviderProcessSpec, RuntimeToolBinding,
 };
-use harness_tools::{
-    AllowAllToolPolicy, ToolArgumentValidationError, ToolArgumentValidator, ToolDefinition,
-};
-use harness_types::{JsonText, ProviderId};
+use harness_tools::{ToolArgumentValidationError, ToolArgumentValidator, ToolDefinition};
+use harness_types::{JsonText, ProviderId, SessionId};
 
 use crate::{
     CredentialConfig, EnvironmentCredentialResolver, HARNESS_CONFIG_SCHEMA_VERSION, HarnessConfig,
-    HarnessConfigError, PolicyConfig, RuntimePlan, ToolConfig,
+    HarnessConfigError, RuntimePlan, ScopeConfig, ScopeSelection, ToolConfig,
+    scope::{
+        CompiledCapabilityPatch, CompiledModelPatch, CompiledProfile, CompiledProfileTool,
+        CompiledScopePatch, CompiledSessionScope, ScopeCatalog,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -101,22 +101,7 @@ fn compile_config(
     config: &HarnessConfig,
     base_dir: &Path,
 ) -> Result<RuntimePlan, HarnessConfigError> {
-    if config.schema_version != HARNESS_CONFIG_SCHEMA_VERSION {
-        return Err(HarnessConfigError::Invalid(format!(
-            "unsupported config schema_version {}; expected {HARNESS_CONFIG_SCHEMA_VERSION}",
-            config.schema_version
-        )));
-    }
-    if config.runtime.name.trim().is_empty() {
-        return Err(HarnessConfigError::Invalid(
-            "runtime.name must not be empty".to_owned(),
-        ));
-    }
-    if config.runtime.data_dir.as_os_str().is_empty() {
-        return Err(HarnessConfigError::Invalid(
-            "runtime.data_dir must not be empty".to_owned(),
-        ));
-    }
+    validate_runtime_config(config)?;
 
     let data_dir = resolve_path(base_dir, &config.runtime.data_dir);
     let runtime_info = HarnessRuntimeInfo {
@@ -137,6 +122,83 @@ fn compile_config(
         ));
     }
 
+    let credentials = compile_credentials(config)?;
+    let (providers, provider_id_values) = compile_providers(config, base_dir, &credentials.keys)?;
+
+    let global = compile_scope_patch("global", &config.global, &provider_id_values)?;
+    let workspaces = compile_workspaces(config, &provider_id_values)?;
+    let compiled_profiles = compile_profiles(config, &provider_id_values)?;
+    let sessions = compile_sessions(config, &provider_id_values, &compiled_profiles, &workspaces)?;
+
+    if let Some(default_profile) = &config.runtime.default_profile
+        && !compiled_profiles.contains_key(default_profile)
+    {
+        return Err(HarnessConfigError::Invalid(format!(
+            "runtime.default_profile {default_profile:?} is not defined in profiles"
+        )));
+    }
+    if let Some(default_workspace) = &config.runtime.default_workspace
+        && !workspaces.contains_key(default_workspace)
+    {
+        return Err(HarnessConfigError::Invalid(format!(
+            "runtime.default_workspace {default_workspace:?} is not defined in workspaces"
+        )));
+    }
+
+    let scope_catalog = ScopeCatalog::new(global, workspaces, compiled_profiles, sessions);
+    validate_session_resolutions(config, &scope_catalog)?;
+
+    let mut profiles = Vec::with_capacity(config.profiles.len());
+    for profile_name in config.profiles.keys() {
+        let mut selection = ScopeSelection::new(profile_name.clone());
+        if let Some(default_workspace) = &config.runtime.default_workspace {
+            selection = selection.with_workspace(default_workspace.clone());
+        }
+        let resolved = scope_catalog.resolve(selection)?;
+        profiles.push((profile_name.clone(), resolved.agent_profile()));
+    }
+
+    Ok(RuntimePlan {
+        runtime_info,
+        data_dir,
+        providers,
+        profiles,
+        default_profile: config.runtime.default_profile.clone(),
+        default_workspace: config.runtime.default_workspace.clone(),
+        credential_resolver: credentials.resolver,
+        credential_count: credentials.count,
+        runtime_events_jsonl,
+        scope_catalog,
+    })
+}
+
+fn validate_runtime_config(config: &HarnessConfig) -> Result<(), HarnessConfigError> {
+    if config.schema_version != HARNESS_CONFIG_SCHEMA_VERSION {
+        return Err(HarnessConfigError::Invalid(format!(
+            "unsupported config schema_version {}; expected {HARNESS_CONFIG_SCHEMA_VERSION}",
+            config.schema_version
+        )));
+    }
+    if config.runtime.name.trim().is_empty() {
+        return Err(HarnessConfigError::Invalid(
+            "runtime.name must not be empty".to_owned(),
+        ));
+    }
+    if config.runtime.data_dir.as_os_str().is_empty() {
+        return Err(HarnessConfigError::Invalid(
+            "runtime.data_dir must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+struct CompiledCredentials {
+    keys: BTreeMap<String, CredentialKey>,
+    resolver: Arc<dyn CredentialResolver>,
+    count: usize,
+}
+
+fn compile_credentials(config: &HarnessConfig) -> Result<CompiledCredentials, HarnessConfigError> {
     let mut credential_keys = BTreeMap::new();
     let mut credential_variables = BTreeMap::new();
     for (name, credential) in &config.credentials {
@@ -169,9 +231,20 @@ fn compile_config(
         );
     }
     let credential_count = credential_variables.len();
-    let credential_resolver: Arc<dyn CredentialResolver> =
+    let resolver: Arc<dyn CredentialResolver> =
         Arc::new(EnvironmentCredentialResolver::new(credential_variables));
+    Ok(CompiledCredentials {
+        keys: credential_keys,
+        resolver,
+        count: credential_count,
+    })
+}
 
+fn compile_providers(
+    config: &HarnessConfig,
+    base_dir: &Path,
+    credential_keys: &BTreeMap<String, CredentialKey>,
+) -> Result<(Vec<ProviderProcessSpec>, BTreeMap<String, ProviderId>), HarnessConfigError> {
     let mut provider_ids = BTreeSet::new();
     let mut provider_id_values = BTreeMap::new();
     let mut providers = Vec::with_capacity(config.providers.len());
@@ -248,8 +321,35 @@ fn compile_config(
         }
         providers.push(spec);
     }
+    Ok((providers, provider_id_values))
+}
 
-    let mut profiles = Vec::with_capacity(config.profiles.len());
+fn compile_workspaces(
+    config: &HarnessConfig,
+    providers: &BTreeMap<String, ProviderId>,
+) -> Result<BTreeMap<String, CompiledScopePatch>, HarnessConfigError> {
+    let mut workspaces = BTreeMap::new();
+    for (name, scope) in &config.workspaces {
+        if name.trim().is_empty() {
+            return Err(HarnessConfigError::Invalid(
+                "workspace names must not be empty".to_owned(),
+            ));
+        }
+        let patch = compile_scope_patch(&format!("workspace {name:?}"), scope, providers)?;
+        let previous = workspaces.insert(name.clone(), patch);
+        debug_assert!(
+            previous.is_none(),
+            "workspace names originate from TOML table keys"
+        );
+    }
+    Ok(workspaces)
+}
+
+fn compile_profiles(
+    config: &HarnessConfig,
+    providers: &BTreeMap<String, ProviderId>,
+) -> Result<BTreeMap<String, CompiledProfile>, HarnessConfigError> {
+    let mut profiles = BTreeMap::new();
     for (profile_name, profile) in &config.profiles {
         if profile_name.trim().is_empty() {
             return Err(HarnessConfigError::Invalid(
@@ -261,22 +361,20 @@ fn compile_config(
                 "profile {profile_name:?} model.model must not be empty"
             )));
         }
-        if profile.model.timeout_ms == 0 {
-            return Err(HarnessConfigError::Invalid(format!(
-                "profile {profile_name:?} model.timeout_ms must be greater than zero"
-            )));
-        }
-        if profile.model.max_output_tokens == Some(0) {
-            return Err(HarnessConfigError::Invalid(format!(
-                "profile {profile_name:?} model.max_output_tokens must be greater than zero"
-            )));
-        }
-        if profile.max_automatic_tool_attempts == 0 {
-            return Err(HarnessConfigError::Invalid(format!(
-                "profile {profile_name:?} max_automatic_tool_attempts must be greater than zero"
-            )));
-        }
-        let model_provider = provider_id_values
+        validate_optional_timeout(
+            &format!("profile {profile_name:?} model.timeout_ms"),
+            profile.model.timeout_ms,
+        )?;
+        validate_optional_output_tokens(
+            &format!("profile {profile_name:?} model.max_output_tokens"),
+            profile.model.max_output_tokens,
+        )?;
+        validate_optional_attempts(
+            &format!("profile {profile_name:?} max_automatic_tool_attempts"),
+            profile.max_automatic_tool_attempts,
+        )?;
+
+        let model_provider = providers
             .get(&profile.model.provider)
             .cloned()
             .ok_or_else(|| HarnessConfigError::UnknownProviderReference {
@@ -284,23 +382,7 @@ fn compile_config(
                 provider: profile.model.provider.clone(),
             })?;
 
-        let model = ModelBinding::new(model_provider, profile.model.model.clone())
-            .with_options(ModelOptions {
-                max_output_tokens: profile.model.max_output_tokens,
-            })
-            .with_timeout_ms(profile.model.timeout_ms);
-        let model = if let Some(system) = &profile.model.system {
-            model.with_system(system.clone())
-        } else {
-            model
-        };
-
-        let policy: Arc<dyn harness_tools::ToolPolicy> = match profile.policy {
-            PolicyConfig::AllowAll => Arc::new(AllowAllToolPolicy),
-        };
-        let mut agent_profile = AgentProfile::new(model, policy)
-            .with_max_automatic_tool_attempts(profile.max_automatic_tool_attempts);
-
+        let mut tools = BTreeMap::new();
         let mut tool_names = BTreeSet::new();
         for tool in &profile.tools {
             if !tool_names.insert(tool.name.clone()) {
@@ -309,15 +391,13 @@ fn compile_config(
                     tool.name
                 )));
             }
-            let tool_provider =
-                provider_id_values
-                    .get(&tool.provider)
-                    .cloned()
-                    .ok_or_else(|| HarnessConfigError::UnknownToolProviderReference {
-                        profile: profile_name.clone(),
-                        tool: tool.name.clone(),
-                        provider: tool.provider.clone(),
-                    })?;
+            let tool_provider = providers.get(&tool.provider).cloned().ok_or_else(|| {
+                HarnessConfigError::UnknownToolProviderReference {
+                    profile: profile_name.clone(),
+                    tool: tool.name.clone(),
+                    provider: tool.provider.clone(),
+                }
+            })?;
             let definition = compile_tool_definition(profile_name, tool)?;
             definition.validate().map_err(|error| {
                 HarnessConfigError::Invalid(format!(
@@ -325,33 +405,219 @@ fn compile_config(
                     tool.name
                 ))
             })?;
-            agent_profile = agent_profile.with_tool(RuntimeToolBinding::new(
-                definition,
-                tool_provider,
-                Arc::new(ObjectArgumentValidator),
-            ));
+            let entry = CompiledProfileTool {
+                binding: RuntimeToolBinding::new(
+                    definition,
+                    tool_provider,
+                    Arc::new(ObjectArgumentValidator),
+                ),
+                enabled: tool.enabled,
+            };
+            let previous = tools.insert(tool.name.clone(), entry);
+            debug_assert!(previous.is_none(), "duplicate profile tools were rejected");
         }
-        profiles.push((profile_name.clone(), agent_profile));
-    }
 
-    if let Some(default_profile) = &config.runtime.default_profile
-        && !config.profiles.contains_key(default_profile)
+        let compiled = CompiledProfile {
+            model_provider,
+            model: profile.model.model.clone(),
+            system: profile.model.system.clone(),
+            timeout_ms: profile.model.timeout_ms,
+            max_output_tokens: profile.model.max_output_tokens,
+            tools,
+            policy: profile.policy,
+            max_automatic_tool_attempts: profile.max_automatic_tool_attempts,
+        };
+        let previous = profiles.insert(profile_name.clone(), compiled);
+        debug_assert!(
+            previous.is_none(),
+            "profile names originate from TOML table keys"
+        );
+    }
+    Ok(profiles)
+}
+
+fn compile_sessions(
+    config: &HarnessConfig,
+    providers: &BTreeMap<String, ProviderId>,
+    profiles: &BTreeMap<String, CompiledProfile>,
+    workspaces: &BTreeMap<String, CompiledScopePatch>,
+) -> Result<BTreeMap<SessionId, CompiledSessionScope>, HarnessConfigError> {
+    let mut sessions = BTreeMap::new();
+    for (session_value, session) in &config.sessions {
+        let session_id = SessionId::new(session_value.clone()).map_err(|error| {
+            HarnessConfigError::Invalid(format!(
+                "session scope key {session_value:?} is not a valid SessionId: {error}"
+            ))
+        })?;
+        if let Some(profile) = &session.profile
+            && !profiles.contains_key(profile)
+        {
+            return Err(HarnessConfigError::Invalid(format!(
+                "session scope {session_value:?} references profile {profile:?}, which is not configured"
+            )));
+        }
+        if let Some(workspace) = &session.workspace
+            && !workspaces.contains_key(workspace)
+        {
+            return Err(HarnessConfigError::Invalid(format!(
+                "session scope {session_value:?} references workspace {workspace:?}, which is not configured"
+            )));
+        }
+        let patch = compile_scope_patch(
+            &format!("session {session_value:?}"),
+            &session.scope,
+            providers,
+        )?;
+        let previous = sessions.insert(
+            session_id,
+            CompiledSessionScope {
+                profile: session.profile.clone(),
+                workspace: session.workspace.clone(),
+                patch,
+            },
+        );
+        debug_assert!(
+            previous.is_none(),
+            "session ids originate from TOML table keys"
+        );
+    }
+    Ok(sessions)
+}
+
+fn compile_scope_patch(
+    label: &str,
+    scope: &ScopeConfig,
+    providers: &BTreeMap<String, ProviderId>,
+) -> Result<CompiledScopePatch, HarnessConfigError> {
+    validate_optional_timeout(&format!("{label} model.timeout_ms"), scope.model.timeout_ms)?;
+    validate_optional_output_tokens(
+        &format!("{label} model.max_output_tokens"),
+        scope.model.max_output_tokens,
+    )?;
+    validate_optional_attempts(
+        &format!("{label} max_automatic_tool_attempts"),
+        scope.max_automatic_tool_attempts,
+    )?;
+
+    let provider = match &scope.model.provider {
+        Some(value) => Some(providers.get(value).cloned().ok_or_else(|| {
+            HarnessConfigError::Invalid(format!(
+                "{label} model.provider {value:?} is not configured"
+            ))
+        })?),
+        None => None,
+    };
+    if scope
+        .model
+        .model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
     {
         return Err(HarnessConfigError::Invalid(format!(
-            "runtime.default_profile {default_profile:?} is not defined in profiles"
+            "{label} model.model must not be empty"
         )));
     }
 
-    Ok(RuntimePlan {
-        runtime_info,
-        data_dir,
-        providers,
-        profiles,
-        default_profile: config.runtime.default_profile.clone(),
-        credential_resolver,
-        credential_count,
-        runtime_events_jsonl,
+    let enable = validate_capability_names(label, "enable", &scope.capabilities.enable)?;
+    let disable = validate_capability_names(label, "disable", &scope.capabilities.disable)?;
+    if let Some(name) = enable.intersection(&disable).next() {
+        return Err(HarnessConfigError::Invalid(format!(
+            "{label} capability {name:?} appears in both enable and disable"
+        )));
+    }
+
+    Ok(CompiledScopePatch {
+        system: scope.system.clone(),
+        system_mode: scope.system_mode,
+        model: CompiledModelPatch {
+            provider,
+            model: scope.model.model.clone(),
+            timeout_ms: scope.model.timeout_ms,
+            max_output_tokens: scope.model.max_output_tokens,
+        },
+        capabilities: CompiledCapabilityPatch {
+            enable: scope.capabilities.enable.clone(),
+            disable: scope.capabilities.disable.clone(),
+        },
+        policy: scope.policy,
+        max_automatic_tool_attempts: scope.max_automatic_tool_attempts,
     })
+}
+
+fn validate_capability_names(
+    label: &str,
+    action: &str,
+    names: &[String],
+) -> Result<BTreeSet<String>, HarnessConfigError> {
+    let mut unique = BTreeSet::new();
+    for name in names {
+        if name.trim().is_empty() {
+            return Err(HarnessConfigError::Invalid(format!(
+                "{label} capabilities.{action} contains an empty tool name"
+            )));
+        }
+        if !unique.insert(name.clone()) {
+            return Err(HarnessConfigError::Invalid(format!(
+                "{label} capabilities.{action} contains duplicate tool {name:?}"
+            )));
+        }
+    }
+    Ok(unique)
+}
+
+fn validate_session_resolutions(
+    config: &HarnessConfig,
+    catalog: &ScopeCatalog,
+) -> Result<(), HarnessConfigError> {
+    for session_value in config.sessions.keys() {
+        let session_id =
+            SessionId::new(session_value.clone()).expect("session ids were preflighted");
+        let profile = catalog
+            .session_profile(&session_id)
+            .or(config.runtime.default_profile.as_deref());
+        let Some(profile) = profile else {
+            continue;
+        };
+        let workspace = catalog
+            .session_workspace(&session_id)
+            .or(config.runtime.default_workspace.as_deref());
+        let mut selection = ScopeSelection::new(profile.to_owned()).with_session(session_id);
+        if let Some(workspace) = workspace {
+            selection = selection.with_workspace(workspace.to_owned());
+        }
+        let _ = catalog.resolve(selection)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_timeout(label: &str, value: Option<u64>) -> Result<(), HarnessConfigError> {
+    if value == Some(0) {
+        return Err(HarnessConfigError::Invalid(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_output_tokens(
+    label: &str,
+    value: Option<u32>,
+) -> Result<(), HarnessConfigError> {
+    if value == Some(0) {
+        return Err(HarnessConfigError::Invalid(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_attempts(label: &str, value: Option<u32>) -> Result<(), HarnessConfigError> {
+    if value == Some(0) {
+        return Err(HarnessConfigError::Invalid(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_provider_config(
